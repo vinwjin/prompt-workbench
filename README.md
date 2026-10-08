@@ -4,6 +4,27 @@
 
 > 0.4.1-beta.1 公开预览。模型生成仍需人工核对事实和约束。不是云服务或Electron安装包，不支持直接暴露公网。
 
+## 界面预览
+
+以下为隔离演示环境中的真实界面截图，使用模拟连接、模拟结果和示例提示词；不含私人数据，生成内容与耗时不代表真实模型效果。点击图片可查看原图。
+
+**创作工作台** — 选择连接与模板，保留原始想法，编辑和收藏结果。
+
+[![创作工作台：连接与模板选择、原始输入和结果并排显示](docs/screenshots/workspace.png)](docs/screenshots/workspace.png)
+
+<details>
+<summary>展开查看：提示词素材管理与结果对比</summary>
+
+**我的提示词** — 用文件夹、标签和星标整理收藏，支持文本与图片、视频素材。
+
+[![我的提示词：素材卡片、文件夹、标签、星标及导入入口](docs/screenshots/prompt-library.png)](docs/screenshots/prompt-library.png)
+
+**结果对比** — 并排查看已有结果、生成条件与本地规则检查；对比操作不发起生成。
+
+[![结果对比：两轮示例结果及各自条件、本地规则检查](docs/screenshots/comparison.png)](docs/screenshots/comparison.png)
+
+</details>
+
 ## 开始使用
 
 1. 安装官方[Node.js 24 LTS](https://nodejs.org/en/download)，确认终端node --version至少为24。推荐24，不使用已结束支持的25。
