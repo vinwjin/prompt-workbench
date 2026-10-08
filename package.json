@@ -1,0 +1,27 @@
+{
+  "name": "prompt-workbench",
+  "version": "0.4.1-beta.1",
+  "private": true,
+  "type": "module",
+  "description": "提示词工坊：本地模型、在线服务、模板和长期资产工作台",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test tests/*.test.js",
+    "check": "node scripts/check.mjs",
+    "test:ui": "node scripts/ui-check.mjs",
+    "shortcuts": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-shortcuts.ps1",
+    "check:release": "node scripts/release-check.mjs",
+    "test:smoke": "node scripts/package-smoke.mjs"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vinwjin/prompt-workbench.git"
+  },
+  "bugs": {
+    "url": "https://github.com/vinwjin/prompt-workbench/issues"
+  }
+}

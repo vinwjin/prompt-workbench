@@ -1,0 +1,10 @@
+import {execFileSync} from 'node:child_process';
+import {readFileSync,existsSync,statSync} from 'node:fs';
+import assert from 'node:assert/strict';
+const files=execFileSync('git',['ls-files','-z'],{encoding:'utf8'}).split('\0').filter(Boolean);
+const allowed=file=>/^(src|public|tests)\/[^/]+\.(js|mjs|css|html|svg|png|ico|json)$/.test(file)||/^scripts\/(check\.mjs|release-check\.mjs|package-smoke\.mjs|ui-check\.mjs|start\.ps1|stop\.ps1|launch\.vbs|install-shortcuts\.ps1)$/.test(file)||/^docs\/(licenses\/[^/]+\.(md|txt)|adr\/[^/]+\.md|[^/]+\.md|screenshots\/[^/]+\.png)$/.test(file)||/^\.github\/(CODEOWNERS|dependabot\.yml|pull_request_template\.md|ISSUE_TEMPLATE\/[^/]+\.yml|workflows\/[^/]+\.yml)$/.test(file)||/^(README\.md|LICENSE|CONTRIBUTING\.md|SECURITY\.md|CODE_OF_CONDUCT\.md|THIRD_PARTY_NOTICES\.md|CHANGELOG\.md|CONTEXT\.md|AGENTS\.md|package\.json|\.gitignore|\.gitattributes|启动提示词工坊\.bat|关闭提示词工坊\.bat)$/.test(file);
+for(const f of files){assert(allowed(f),'文件不在发布白名单：'+f);assert(statSync(f).size<5*1024*1024,'文件超出发布限额：'+f);if(/\.(png|ico)$/.test(f))continue;const text=readFileSync(f,'utf8');assert(!/(?:sk-(?:proj-)?[A-Za-z0-9_-]{24,}|gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|AKIA[A-Z0-9]{16}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----)/.test(text),'疑似凭据：'+f);assert(!/[A-Z]:\\{1,2}(?:Users|Documents|office file|models)\\/i.test(text),'疑似个人绝对路径：'+f);}
+const p=JSON.parse(readFileSync('package.json','utf8'));assert.equal(p.license,'MIT');assert(!p.dependencies&&!p.devDependencies,'不应增加依赖');assert(p.private===true,'防误发npm');
+for(const f of ['LICENSE','README.md','CONTRIBUTING.md','SECURITY.md','THIRD_PARTY_NOTICES.md','docs/SOURCES.md','docs/DATA.md','docs/MAINTENANCE.md','.github/workflows/ci.yml'])assert(existsSync(f),'缺发布材料：'+f);
+for(const f of files.filter(f=>f.startsWith('.github/workflows/'))){const text=readFileSync(f,'utf8');assert(!/pull_request_target|self-hosted|secrets\./.test(text),'不安全PR上下文：'+f);for(const m of text.matchAll(/uses:\s+([^\s#]+)/g))assert(/@[a-f0-9]{40}$/.test(m[1]),'Actions必须固定完整SHA');}
+console.log(`公开内容检查通过：${files.length}个白名单文件；特征扫描不替代人工审核`);

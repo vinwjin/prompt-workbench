@@ -1,0 +1,10 @@
+import test from'node:test';
+import assert from'node:assert/strict';
+import{mkdirSync,mkdtempSync}from'node:fs';
+import path from'node:path';
+import{parseRepoGallery,repoImage}from'../src/repo-gallery.js';
+import{Sources}from'../src/sources.js';
+import{Store}from'../src/store.js';
+const fixture='### 案例 100：建筑模型 (by [@artist](https://x.com/artist))\n[原文链接](https://x.com/artist/status/123)\n<img src="cases/100/model.png">\n**提示词**\n```\n自然光建筑模型\n```';
+test('仓库图文解析保留正确原帖/提示词/图片/作者，图片范围只限核实仓库路径',()=>{const rows=parseRepoGallery(fixture);assert.equal(rows.length,1);assert.equal(rows[0].content,'自然光建筑模型');assert.equal(rows[0].author,'@artist');assert.equal(rows[0].sourceUrl,'https://x.com/artist/status/123');assert.ok(repoImage(rows[0].frontCover));assert.equal(repoImage(rows[0].frontCover.replace('jamez-bondos','someone')),'');assert.equal(repoImage(rows[0].frontCover+'?redirect=evil'),'');assert.throws(()=>parseRepoGallery(fixture.replace('cases/100/model.png','https://evil.test/a.png')),/格式/);});
+test('仓库同步先核验图片，失败保持原目录；验证成功才替换',async()=>{mkdirSync('work',{recursive:true});const store=new Store(mkdtempSync(path.resolve('work','repo-unit-')));let fail=true,checks=0;const sources=new Sources(store,{fetcher:async()=>new Response(fixture),imageVerifier:async()=>{checks++;if(fail)throw Error('image offline');}});sources.ingest('xrepo',fixture.replace('自然光建筑模型','原有正文'));const old=store.list('shared')[0];await assert.rejects(sources.sync('xrepo'),/缓存/);assert.equal(store.get('shared',old.id).content,'原有正文');fail=false;await sources.sync('xrepo');assert.equal(store.get('shared',old.id).content,'自然光建筑模型');assert.match(store.get('shared',old.id).license,/CC BY/);assert.ok(checks>=2);store.close();});

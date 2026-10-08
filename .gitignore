@@ -1,0 +1,14 @@
+data/
+work/
+node_modules/
+*.log
+*.pid
+.env
+.workbuddy/
+
+artifacts/
+.env.*
+!.env.example
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm

@@ -1,0 +1,24 @@
+name: Bug反馈
+description: 使用合成样例描述可复现问题
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: 不要上传真实密钥、data数据库、私人提示词或未脱敏日志。漏洞请走Security私密报告。
+  - type: textarea
+    id: environment
+    attributes:
+      label: 版本与环境
+      description: 应用、Node、Windows、浏览器和安装方式
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 最小步骤、预期与实际
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 合成样例与脱敏错误

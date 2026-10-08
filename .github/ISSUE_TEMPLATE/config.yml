@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 私密安全报告
+    url: https://github.com/vinwjin/prompt-workbench/security/advisories/new
+    about: 不要公开漏洞细节或真实密钥

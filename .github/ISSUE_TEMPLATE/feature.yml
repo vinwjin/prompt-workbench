@@ -1,0 +1,16 @@
+name: 功能建议
+description: 提出场景与最小改进
+title: "[Feature] "
+body:
+  - type: textarea
+    id: scenario
+    attributes:
+      label: 使用场景与当前困难
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: 建议范围、替代方案及数据/费用影响
+    validations:
+      required: true
