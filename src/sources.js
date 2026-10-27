@@ -155,6 +155,7 @@ export class Sources{
     }while(current);return old;
   }
   async syncHistory(){
+    if(this.feed('s38').syncable===false)throw Error('公开版未确认自动读取权限；请访问原站，或导入你有权使用的文件。');
     if(this.closing||this.batchBusy()||this.syncing.size)throw Error('请等待来源同步结束');
     this.syncing.add('s38');const work=(async()=>{const files=[];for(const file of [...Array.from({length:10},(_,i)=>(i+1)*100+'.md'),'README.md']){const data=await this.readRepo({repo:'songguoxs/gpt4o-image-prompts',branch:'master'},file);files.push({file,text:data.text});}const h=historicalImages(files),old=this.store.get('feeds','s38')||{};return this.ingestRows('s38',h.rows,'historical-markdown:complete',old.total,{...old,historyCases:h.cases,historyEligible:h.eligible,historyReferences:h.references,historyRejected:h.rejected});})();this.inflight.add(work);try{return await work;}finally{this.inflight.delete(work);this.syncing.delete('s38');}
   }

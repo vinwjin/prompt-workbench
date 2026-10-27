@@ -1,12 +1,34 @@
-import {RecoveryGate} from './recovery-gate.js';
-import {waitForServiceExit} from './service-exit.js';
-import {VERSION,SLOGAN} from './version.js';
-import { Collections } from './collections.js';
-import {Studio}from'./studio.js';
-import {Recycle} from './recycle.js';
-import {PromptLab} from './lab.js';
-import {AssetImporter} from './asset-import.js';
-import {isPromptTextFile} from './prompt-import.js';
+// Keep recovery independent of new modules: an older backend may not serve them.
+const {VERSION:CLIENT_VERSION}=await import('./version.js');
+const backendVersion=(await fetch('/health').then(r=>r.json()).catch(()=>({}))).version;
+if(backendVersion!==CLIENT_VERSION){
+  const $=s=>document.querySelector(s),feedback=$('#run-feedback');let snapshot={},snapshotReady=false,timer,saving=Promise.resolve();
+  const api=async(route,body)=>{const r=await fetch('/api/'+route,{method:body?'POST':'GET',headers:body?{'Content-Type':'application/json'}:{},body:body?JSON.stringify(body):undefined});if(!r.ok)throw Error('旧后台请求失败，请保留输入后使用原关闭脚本');return r.json();};
+  const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const setStatus=text=>{feedback.textContent=text;};
+  try{const state=await api('state');snapshot=state.draft||{};snapshotReady=true;$('#input').value=snapshot.input||'';
+    for(const [selector,rows,name]of [['#provider-select',state.providers||[],'name'],['#template-select',state.templates||[],'name']])$(selector).innerHTML=rows.map(r=>'<option value="'+esc(r.id)+'">'+esc(r[name])+'</option>').join('');
+    $('#provider-select').value=snapshot.providerId||state.providers?.[0]?.id||'';$('#template-select').value=snapshot.templateId||'optimize';
+  }catch(e){setStatus(e.message);}
+  for(const el of document.querySelectorAll('button,select,input,textarea'))if(!el.matches('#input,#shutdown-top,#shutdown'))el.disabled=true;
+  const save=()=>{if(!snapshotReady)return Promise.reject(Error('尚未读取旧草稿，保留当前输入后重试，暂不覆盖保存'));clearTimeout(timer);const input=$('#input').value;saving=saving.catch(()=>{}).then(async()=>{snapshot=await api('draft',{...snapshot,input,providerId:snapshot.providerId||$('#provider-select').value,templateId:snapshot.templateId||$('#template-select').value});});return saving;};
+  $('#input').addEventListener('input',()=>{clearTimeout(timer);timer=setTimeout(()=>save().then(()=>setStatus('旧后台：草稿已保存，可正常关闭后重新启动新版。')).catch(e=>setStatus(e.message)),500);});
+  const close=async()=>{if(!confirm('保存草稿并正常关闭旧后台？'))return;try{await save();await api('shutdown',{});setStatus('正在保存并关闭旧后台，请等待退出确认…');let failures=0;
+    for(let i=0;i<180;i++){await new Promise(r=>setTimeout(r,250));try{const r=await fetch('/health',{cache:'no-store'});if(!r.ok){failures=0;continue;}const h=await r.json();failures=0;if(h.version!==backendVersion){setStatus('旧后台已退出，新版已启动，请刷新页面。');return;}}catch(e){if(e instanceof TypeError&&++failures>=3){setStatus('服务已关闭，可通过启动器重新打开。');return;}}}
+    setStatus('尚未确认退出，请检查原关闭脚本，未强制结束服务。');
+  }catch(e){setStatus(e.message);}};
+  $('#shutdown-top').onclick=close;$('#shutdown').onclick=close;$('#version-tag').textContent=CLIENT_VERSION;
+  setStatus('页面版本与后台不一致：可以编辑并保存草稿、正常关闭；重新启动后启用新版功能。');
+}else{
+const {RecoveryGate}=await import("./recovery-gate.js");
+const {waitForServiceExit}=await import("./service-exit.js");
+const {VERSION,SLOGAN}=await import("./version.js");
+const { Collections }=await import("./collections.js");
+const {Studio}=await import("./studio.js");
+const {Recycle}=await import("./recycle.js");
+const {PromptLab}=await import("./lab.js");
+const {AssetImporter}=await import("./asset-import.js");
+const {isPromptTextFile}=await import("./prompt-import.js");
 const $=s=>document.querySelector(s);
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let state={providers:[],templates:[],assets:[],jobs:[],presets:[]},currentJob=null,images=[],lastResult='',selectorStamp='',draftTimer,toastTimer,importMode='backup';
@@ -19,7 +41,7 @@ const studio=new Studio({api,act,refresh,toast,openForm,useText:useCollectedText
 const lab=new PromptLab({api,act,refresh,toast,show,download,payload,draft,assertIdle:assertInputIdle,useText:useComposedText,readState:()=>state,lastResult:()=>lastResult,selectedJobs:()=>[...collections.jobSelection],submit:submitJob});
 const assetImporter=new AssetImporter({api,act,toast,openForm});
 let imageBatchUI,connectionUI,settingsUI;
-const backendVersion=(await fetch('/health').then(r=>r.json()).catch(()=>({}))).version;let inputSource=null,imageEpoch=0;
+let inputSource=null,imageEpoch=0;
 function assertInputIdle(){if($('#run').disabled||state.activeJobId)throw Error('请先完成或取消正在运行的任务，再带入其他内容');}
 function useComposedText(text,source){assertInputIdle();recoveryGate.invalidate();inputSource=source;$('#input').value=text;$('#output').value='';currentJob=null;lastResult='';renderJob();counts();draft();show('workspace');}
 function useCollectedText(text,source=null){assertInputIdle();recoveryGate.invalidate();lab.appliedIds=[];lab.paintComposition();imageEpoch++;images=[];document.querySelector('#image-input').value='';renderImages();inputSource=source;$('#input').value=text;$('#output').value='';currentJob=null;lastResult='';renderJob();$('#run').disabled=false;$('#output').readOnly=false;$('#task-progress').classList.add('hidden');$('#job-status').textContent='等待创作';counts();draft();show('workspace');}
@@ -170,3 +192,5 @@ async function poll(){if(serviceClosing){setTimeout(poll,1000);return;}let busy=
 setTimeout(poll,350);
 
 for(const dialog of document.querySelectorAll('dialog')){let startedOutside=false;const outside=e=>{const r=dialog.getBoundingClientRect();return e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom;};dialog.addEventListener('pointerdown',e=>{startedOutside=e.target===dialog&&outside(e);});dialog.addEventListener('click',e=>{if(dialog.dataset.busy==='true')return;if(startedOutside&&e.target===dialog&&outside(e))dialog.close();startedOutside=false;});}
+
+}

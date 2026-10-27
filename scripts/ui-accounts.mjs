@@ -5,7 +5,9 @@ import net from 'node:net';
 import assert from 'node:assert/strict';
 import {generateKeyPairSync,sign} from 'node:crypto';
 import {setTimeout as sleep} from 'node:timers/promises';
-import {createWorkbench} from '../tests/source-fixtures.js';
+process.env.PW_ANTIGRAVITY_OAUTH_CLIENT_ID='synthetic-client.apps.googleusercontent.com';
+process.env.PW_ANTIGRAVITY_OAUTH_CLIENT_SECRET='synthetic-oauth-registration';
+const {createWorkbench}=await import('../tests/source-fixtures.js');
 import {removeOwnedArtifact} from './test-artifacts.mjs';
 
 const out=path.resolve(process.env.PW_ACCOUNT_UI_EVIDENCE_DIR||'work/accounts-dev19/ui');mkdirSync(out,{recursive:true});
