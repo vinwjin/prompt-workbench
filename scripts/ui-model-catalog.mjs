@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 process.env.PW_ANTIGRAVITY_OAUTH_CLIENT_ID='synthetic-client.apps.googleusercontent.com';
 process.env.PW_ANTIGRAVITY_OAUTH_CLIENT_SECRET='synthetic-oauth-registration';
 const {createWorkbench}=await import('../tests/source-fixtures.js');
-import {accountBase} from '../src/accounts.js';
+const {accountBase}=await import('../src/accounts.js');
 import {removeOwnedArtifact} from './test-artifacts.mjs';
 const out=path.resolve('work/model-catalog-dev20/ui');mkdirSync(out,{recursive:true});const data=mkdtempSync(path.join(out,'data-')),profile=mkdtempSync(path.join(out,'chrome-')),calls=[],generations=[];let offline=false,release,hold=false;
 const platformFor=url=>url.includes('cloudcode-pa')?'antigravity':url.includes('workbuddy')?'workbuddy':url.includes('api.openai')?'chatgpt':'grok';

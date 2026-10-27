@@ -15,3 +15,13 @@ test('健康超时/损坏/离线不算退出，恢复成功重置计数，连续
  assert.equal(await waitForServiceExit('old',{attempts:3,pause:async()=>{},online:()=>false,fetcher:async()=>{throw new TypeError('offline');}}),'pending');
  assert.equal(await waitForServiceExit('old',{pause:async()=>{},fetcher:async()=>({ok:true,json:async()=>({app:'prompt-workbench',version:'new'})})}),'restarted');
 });
+test('最早公开后台兼容入口同样拒绝离线、超时及损坏健康响应，不误报已关闭',async()=>{
+ const source=readFileSync('public/app.js','utf8'),start=source.indexOf('async function compatibilityWaitForServiceExit('),end=source.indexOf('  const close=async()=>',start);
+ assert.ok(start>0&&end>start);const wait=new Function('return ('+source.slice(start,end).trim()+')')();
+ const pause=async()=>{};let calls=0;
+ assert.equal(await wait('old',{attempts:3,pause,online:()=>false,fetcher:async()=>{throw new TypeError('offline');}}),'pending');
+ assert.equal(await wait('old',{attempts:3,pause,fetcher:async()=>{throw {name:'TimeoutError'};}}),'pending');
+ assert.equal(await wait('old',{attempts:3,pause,fetcher:async()=>({ok:true,json:async()=>({})})}),'pending');
+ assert.equal(await wait('old',{attempts:3,pause,fetcher:async(url,options)=>{assert.ok(options.signal);calls++;throw new TypeError('connection failed');}}),'closed');assert.equal(calls,3);
+ assert.equal(await wait('old',{pause,fetcher:async()=>({ok:true,json:async()=>({app:'prompt-workbench',version:'new'})})}),'restarted');
+});

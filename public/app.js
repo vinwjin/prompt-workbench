@@ -13,9 +13,20 @@ if(backendVersion!==CLIENT_VERSION){
   for(const el of document.querySelectorAll('button,select,input,textarea'))if(!el.matches('#input,#shutdown-top,#shutdown'))el.disabled=true;
   const save=()=>{if(!snapshotReady)return Promise.reject(Error('尚未读取旧草稿，保留当前输入后重试，暂不覆盖保存'));clearTimeout(timer);const input=$('#input').value;saving=saving.catch(()=>{}).then(async()=>{snapshot=await api('draft',{...snapshot,input,providerId:snapshot.providerId||$('#provider-select').value,templateId:snapshot.templateId||$('#template-select').value});});return saving;};
   $('#input').addEventListener('input',()=>{clearTimeout(timer);timer=setTimeout(()=>save().then(()=>setStatus('旧后台：草稿已保存，可正常关闭后重新启动新版。')).catch(e=>setStatus(e.message)),500);});
-  const close=async()=>{if(!confirm('保存草稿并正常关闭旧后台？'))return;try{await save();await api('shutdown',{});setStatus('正在保存并关闭旧后台，请等待退出确认…');let failures=0;
-    for(let i=0;i<180;i++){await new Promise(r=>setTimeout(r,250));try{const r=await fetch('/health',{cache:'no-store'});if(!r.ok){failures=0;continue;}const h=await r.json();failures=0;if(h.version!==backendVersion){setStatus('旧后台已退出，新版已启动，请刷新页面。');return;}}catch(e){if(e instanceof TypeError&&++failures>=3){setStatus('服务已关闭，可通过启动器重新打开。');return;}}}
-    setStatus('尚未确认退出，请检查原关闭脚本，未强制结束服务。');
+  // Same exit guards as the normal module, inlined for old static-route compatibility.
+async function compatibilityWaitForServiceExit(version,{fetcher=fetch,pause=ms=>new Promise(r=>setTimeout(r,ms)),attempts=60,online=()=>globalThis.navigator?.onLine!==false}={}){
+  let failed=0;
+  for(let n=0;n<attempts;n++){
+    await pause(500);
+    try{const r=await fetcher('/health',{cache:'no-store',signal:AbortSignal.timeout(1500)});failed=0;if(!r.ok)continue;const h=await r.json();if(h.app==='prompt-workbench'&&typeof h.version==='string'&&h.version!==version)return 'restarted';}
+    catch(e){if(e.name==='TypeError'&&online()){if(++failed>=3)return 'closed';}else failed=0;}
+  }
+  return 'pending';
+}
+
+  const close=async()=>{if(!confirm('保存草稿并正常关闭旧后台？'))return;try{await save();await api('shutdown',{});setStatus('正在保存并关闭旧后台，请等待退出确认…');
+    const result=await compatibilityWaitForServiceExit(backendVersion);
+    setStatus(result==='closed'?'服务已关闭，可通过启动器重新打开。':result==='restarted'?'旧后台已退出，新版已启动，请刷新页面。':'尚未确认退出，请检查原关闭脚本，未强制结束服务。');
   }catch(e){setStatus(e.message);}};
   $('#shutdown-top').onclick=close;$('#shutdown').onclick=close;$('#version-tag').textContent=CLIENT_VERSION;
   setStatus('页面版本与后台不一致：可以编辑并保存草稿、正常关闭；重新启动后启用新版功能。');
