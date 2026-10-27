@@ -6,6 +6,7 @@ export function sourceImage(raw){try{const u=new URL(raw);if(u.protocol!=='https
   if(match&&repos.has(match[1])&&!u.search&&/^(?:assets|imgs|cases|data\/images|public\/images)\/.+\.(?:png|jpe?g|webp|gif)$/i.test(match[2]))return u.href;
   if(u.hostname==='images.meigen.ai'&&!u.search&&/^\/tweets\/\d+\/\d+\.(?:png|jpe?g|webp)$/i.test(p))return u.href;
   if(u.hostname==='bibigpt-apps.chatvid.ai'&&/^\/chatimg\/[\w-]+\.(?:png|jpe?g|webp)$/i.test(p)&&(!u.search||u.search==='?v=1'))return u.href;
+  if(u.hostname==='img.opennana.com'&&!u.search&&/^\/prompts\/(?:images|assets)\/[A-Za-z0-9_/-]+\.(?:png|jpe?g|webp)$/i.test(p))return u.href;
   return '';
 }catch{return '';}}
 export function repoMedia(raw,feed,file=feed.path||'README.md'){try{if(!raw||!feed.repo)return '';const root=/^(?:assets|imgs|cases|data\/images|public\/images)\//.test(raw)?'README.md':file;const candidate=/^https:\/\//.test(raw)?raw:new URL(raw,`https://gcore.jsdelivr.net/gh/${feed.repo}@main/${root}`).href;return sourceImage(candidate);}catch{return '';}}

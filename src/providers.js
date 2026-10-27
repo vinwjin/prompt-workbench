@@ -1,7 +1,10 @@
 import {streamGeneration,visibleText} from './streaming.js';
+import {accountModels,generateAccount} from './account-inference.js';
+import {accountBase} from './accounts.js';
 export function validateProvider(p){
   if(!p||!String(p.name||'').trim())throw new Error('连接名称不能为空');
-  if(!['openai','anthropic','gemini','ollama','router','llama'].includes(p.protocol))throw new Error('接口协议无效');
+  if(!['openai','anthropic','gemini','ollama','router','llama','account'].includes(p.protocol))throw new Error('接口协议无效');
+  if(p.protocol==='account'&&p.baseUrl!==accountBase(p.accountPlatform,p.accountRegion))throw Error('账号连接必须使用对应平台固定服务地址');
   const url=new URL(p.baseUrl);const local=['127.0.0.1','localhost','[::1]'].includes(url.hostname);
   if(url.username||url.password||url.search||url.hash)throw new Error('服务地址不能包含凭据、查询参数或片段');
   if(url.protocol!=='https:'&&!(url.protocol==='http:'&&local))throw new Error('在线接口必须使用 HTTPS；HTTP 只允许本机地址');
@@ -17,7 +20,7 @@ export async function request(url,{method='GET',headers={},body,signal,timeout=1
   if(!res.ok)throw new Error(`HTTP ${res.status}：${data.error?.message||data.message||'模型服务请求失败'}`);
   return data;
 }
-export function buildGeneration(p,{system,user,images=[],temperature=0.6,maxTokens=1024,autoUnload=true}){
+export function buildGeneration(p,{system,user,images=[],temperature=0.6,maxTokens=1024,autoUnload=true,freshContext=false}){
   const key=p.apiKey||'';const textParts=[{type:'text',text:user},...images.map(i=>({type:'image_url',image_url:{url:i.dataUrl}}))];
   const nativeOpenAI=new URL(p.baseUrl).hostname==='api.openai.com';
   const reasoning=nativeOpenAI&&/^(gpt-[5-9]|o[1-9])/.test(p.model);
@@ -26,9 +29,10 @@ export function buildGeneration(p,{system,user,images=[],temperature=0.6,maxToke
   if(p.protocol==='gemini')return {url:p.baseUrl+`/models/${encodeURIComponent(p.model.replace(/^models\//,''))}:generateContent`,headers:{'x-goog-api-key':key},body:{systemInstruction:{parts:[{text:system}]},contents:[{role:'user',parts:[{text:user},...images.map(i=>({inlineData:{mimeType:i.dataUrl.split(';')[0].slice(5),data:i.dataUrl.split(',')[1]}}))]}],generationConfig:{...(includeTemperature?{temperature}:{}),maxOutputTokens:maxTokens}}};
   if(p.protocol==='ollama')return {url:rootUrl(p)+'/api/chat',headers:key?{Authorization:'Bearer '+key}:{},body:{model:p.model,stream:false,keep_alive:autoUnload?0:'5m',messages:[{role:'system',content:system},{role:'user',content:user,...(images.length?{images:images.map(i=>i.dataUrl.split(',')[1])}:{})}],options:{...(includeTemperature?{temperature}:{}),num_predict:maxTokens}}};
   const tokenField=p.tokenField&&p.tokenField!=='auto'?p.tokenField:nativeOpenAI?'max_completion_tokens':'max_tokens';
-  return {url:p.baseUrl+'/chat/completions',headers:key?{Authorization:'Bearer '+key}:{},body:{model:p.model,stream:false,messages:[{role:'system',content:system},{role:'user',content:images.length?textParts:user}],...(includeTemperature?{temperature}:{}),[tokenField]:maxTokens,...(['router','llama'].includes(p.protocol)?{chat_template_kwargs:{enable_thinking:false}}:{})}};
+  return {url:p.baseUrl+'/chat/completions',headers:key?{Authorization:'Bearer '+key}:{},body:{model:p.model,stream:false,messages:[{role:'system',content:system},{role:'user',content:images.length?textParts:user}],...(includeTemperature?{temperature}:{}),[tokenField]:maxTokens,...(['router','llama'].includes(p.protocol)?{chat_template_kwargs:{enable_thinking:false},...(freshContext?{cache_prompt:false}:{})}:{})}};
 }
 export async function generate(p,input,signal){
+  if(p.protocol==='account')return generateAccount(p,input,signal);
   const cfg=buildGeneration(p,input);const streamed=input.stream?await streamGeneration(p,cfg,input,signal):null;if(streamed?.result)return streamed.result;const data=streamed?.data||await request(cfg.url,{method:'POST',headers:cfg.headers,body:cfg.body,signal,timeout:Math.min(1800000,Number(p.timeoutMs)||300000)});
   let output,usage,finishReason;
   if(p.protocol==='anthropic'){output=data.content?.filter(c=>c.type==='text').map(c=>c.text).join('\n');usage=data.usage;finishReason=data.stop_reason;}
@@ -39,10 +43,12 @@ export async function generate(p,input,signal){
   output=visibleText(output);if(!output)throw Error('模型只有思考内容，没有可用正文');input.onProgress?.(output);return {output,usage,finishReason,truncated:['length','MAX_TOKENS','max_tokens'].includes(finishReason)};
 }
 export async function models(p){
+  if(p.protocol==='account')return accountModels(p);
   let url=p.baseUrl+'/models',headers=p.apiKey?{Authorization:'Bearer '+p.apiKey}:{};
   if(p.protocol==='anthropic')headers={'x-api-key':p.apiKey||'','anthropic-version':'2023-06-01'};
   if(p.protocol==='gemini')headers={'x-goog-api-key':p.apiKey||''};
   if(p.protocol==='ollama')url=rootUrl(p)+'/api/tags';
   const data=await request(url,{headers,timeout:15000});
-  return (data.data||data.models||[]).map(m=>({id:m.id||m.name,status:m.status?.value||m.status||'available'}));
+  const rows=data.data||data.models;if(!Array.isArray(rows))throw Error('模型目录响应格式无效：需要模型数组');
+  return rows.slice(0,2000).filter(m=>m&&typeof(m.id||m.name)==='string'&&(m.id||m.name).trim()).map(m=>{const vision=typeof m.capabilities?.vision==='boolean'?m.capabilities.vision:Array.isArray(m.input_modalities)&&m.input_modalities.length?m.input_modalities.includes('image'):undefined;return {id:m.id||m.name,status:m.status?.value||m.status||'available',...(vision!==undefined?{vision}:{})};});
 }

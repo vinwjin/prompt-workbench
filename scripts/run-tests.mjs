@@ -1,0 +1,10 @@
+import {spawn} from 'node:child_process';
+import {mkdirSync,mkdtempSync,readdirSync} from 'node:fs';
+import path from 'node:path';
+import {removeOwnedArtifact} from './test-artifacts.mjs';
+mkdirSync('work',{recursive:true});const dir=mkdtempSync(path.resolve('work','unit-run-'));
+const files=readdirSync('tests').filter(f=>f.endsWith('.test.js')).map(f=>'tests/'+f);
+const child=spawn(process.execPath,['--test','--test-timeout=30000',...files,...process.argv.slice(2)],{stdio:'inherit',windowsHide:true,env:{...process.env,PW_TEST_ROOT:dir,PW_ANTIGRAVITY_OAUTH_CLIENT_ID:'synthetic-client.apps.googleusercontent.com',PW_ANTIGRAVITY_OAUTH_CLIENT_SECRET:'synthetic-oauth-registration'}});
+const code=await new Promise((resolve,reject)=>{child.on('error',reject);child.on('exit',code=>resolve(code??1));});
+if(code===0){removeOwnedArtifact(dir);console.log('本次单元测试临时资料已清理。');}else console.error('失败诊断数据保留：'+dir);
+process.exitCode=code;

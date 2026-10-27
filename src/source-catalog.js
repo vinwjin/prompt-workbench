@@ -494,5 +494,8 @@ export const EXTRA_FEEDS = [
     "syncable": false,
     "contentKind": "text",
     "notice": "数据集绑定模板，先导入整理成文字的样本，不执行Jinja。"
-  }
+  },
+{"id":"s38","auditId":"S38","name":"OpenNana · 图片案例","url":"https://opennana.com/awesome-prompt-gallery?media_type=image","repoUrl":"https://github.com/songguoxs/gpt4o-image-prompts","snapshotUrl":"https://raw.githubusercontent.com/songguoxs/gpt4o-image-prompts/master/data/prompts.json","license":"未声明完整图库再分发许可 · 原作者权利保留","description":"网站当前图片与历史仓库分别保留来源，每批100条公开免费案例。","adapter":"opennana","contentKind":"images","syncable":true,"notice":"个人主动读取；仅同步免费且可读的完整正文与效果图，付费锁定条目跳过。支持快速单页、全量/续传及停止。"},
+{"id":"s39","auditId":"S39","name":"OpenNana · 视频案例","url":"https://opennana.com/awesome-prompt-gallery?media_type=video","license":"未声明完整图库再分发许可 · 原作者权利保留","description":"原作者、双语正文、封面和MP4效果链接，每批100条公开免费候选。","adapter":"opennana","contentKind":"video","syncable":true,"notice":"仅匿名公开免费详情，不登录或解锁；无正文、原帖或效果视频的案例不展示。支持全量/续传及停止。"},
+{"id":"s40","auditId":"S40","name":"松果先森 · 视频仓库案例","url":"https://github.com/songguoxs/awesome-video-prompts","repo":"songguoxs/awesome-video-prompts","path":"README.md","adapter":"video-repository","contentKind":"video","syncable":true,"license":"原作者权利保留 · 未核实完整再分发许可","description":"50个原作者视频案例，保留单语/双语正文、X原帖和稳定GitHub视频附件。","notice":"无逐案静态封面，以视频占位和原链接观看；不是网站613条完整导出。"}
 ];

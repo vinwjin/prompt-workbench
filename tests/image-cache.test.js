@@ -4,9 +4,9 @@ import {mkdtempSync,mkdirSync,readFileSync,writeFileSync,existsSync} from 'node:
 import path from 'node:path';
 import {Store} from '../src/store.js';
 import {ImageCache,coverUrl} from '../src/image-cache.js';
-import {Sources,parseCurated} from '../src/sources.js';
-import {createWorkbench} from '../src/server.js';
-const temp=()=>{mkdirSync('work',{recursive:true});return mkdtempSync(path.resolve('work','image-test-'));};
+import {Sources,parseCurated} from './source-fixtures.js';
+import {createWorkbench} from './source-fixtures.js';
+const temp=()=>{mkdirSync('work',{recursive:true});return mkdtempSync(path.resolve(process.env.PW_TEST_ROOT||'work','image-test-'));};
 const png=readFileSync('public/icon-256.png'),url='https://img.alicdn.com/sample.png';
 test('X 精选保留对应原帖、正文、作者与效果图，重复原帖去重；不执行源 HTML',()=>{
   const block='### No. 1: 示例\n#### 📝 Prompt\n```\n保留建筑材料与光照\n```\n<img src="https://cms-assets.youmind.com/media/example.jpg">\n- **Author:** [作者](https://x.com/author)\n- **Source:** [Twitter Post](https://x.com/author/status/123)\n';
@@ -36,11 +36,30 @@ test('缓存容量按最久未访问清理，过期清理不动资产；清理�
   let release,started;const ready=new Promise(r=>started=r);cache.fetcher=async()=>{started();await new Promise(r=>release=r);return new Response(png);};const pending=cache.get(url);await ready;const clearing=cache.clear();await assert.rejects(cache.get('https://img.alicdn.com/second.png'),/清理/);release();await pending;await clearing;assert.equal(cache.stats().count,0);store.close();
 });
 
+test('自定义图片缓存可超过 2GB，重启保留设置和图片；无效设置不写入或清理',async()=>{
+  const dir=temp();let store=new Store(dir),downloads=0;
+  const fetcher=async()=>{downloads++;return new Response(png);};
+  let cache=new ImageCache(store,{fetcher});const image=await cache.get(url);
+  const asset=store.put('assets',{title:'私人收藏',content:'保留正文'});
+  cache.configure({limitMB:8192,maxAgeDays:7});
+  assert.equal(cache.stats().limitMB,8192);assert.equal(cache.stats().bytes,png.length);
+  store.close();store=new Store(dir);cache=new ImageCache(store,{fetcher});
+  try{
+    assert.equal(cache.settings().limitMB,8192);assert.equal(cache.settings().maxAgeDays,7);
+    assert.deepEqual((await cache.get(url)).data,image.data);assert.equal(downloads,1);
+    for(const limitMB of [0,63,64.5,NaN,Infinity,Number.MAX_SAFE_INTEGER,8589934592])assert.throws(()=>cache.configure({limitMB,maxAgeDays:7}),/容量/);
+    for(const maxAgeDays of [0,181,1.5])assert.throws(()=>cache.configure({limitMB:4096,maxAgeDays}),/天数/);
+    assert.equal(cache.settings().limitMB,8192);assert.equal(cache.settings().maxAgeDays,7);
+    assert.equal(cache.stats().count,1);assert.ok(existsSync(path.join(cache.dir,store.list('cacheImages')[0].id+'.img')));
+    assert.equal(store.get('assets',asset.id).content,'保留正文');
+  }finally{store.close();}
+});
+
 test('母版保留效果图和统计，图文筛选排序正确；图片 API 使用会话并禁止浏览器磁盘缓存',async()=>{
   let downloads=0;const app=await createWorkbench({port:0,dataDir:temp(),imageFetcher:async()=>{downloads++;return new Response(png);}});
   try{app.sources.ingest('mother',JSON.stringify({success:true,result:{total:2,datas:[{id:1,title:'有图',frontCover:url,viewCount:10,copyCount:2},{id:2,title:'无图'}]}}));const id=app.sources.list({kind:'images'}).items[0].id;assert.equal(app.sources.list({kind:'images'}).total,1);assert.equal(app.sources.list({kind:'text'}).total,1);assert.equal(app.sources.list({sort:'views'}).items[0].viewCount,10);
     const root='http://127.0.0.1:'+app.port;assert.equal((await fetch(root+'/api/shared/'+id+'/image')).status,401);const home=await fetch(root),cookie=home.headers.get('set-cookie').split(';')[0];const get=()=>fetch(root+'/api/shared/'+id+'/image',{headers:{cookie}});
-    assert.equal((await get()).status,400);assert.equal(downloads,0,'受限来源不下载远程图片');
+    assert.equal((await get()).status,200);assert.equal(downloads,1,'已授权母版可直接读取效果图');
     // 模拟既有本地缓存；不访问真实来源。
     await app.imageCache.get(url);const image=await get();assert.equal(image.status,200);assert.equal(image.headers.get('Content-Type'),'image/png');assert.equal(image.headers.get('Cache-Control'),'no-store');assert.deepEqual(Buffer.from(await image.arrayBuffer()),png);await get();assert.equal(downloads,1);assert.equal(app.imageCache.stats().count,1);
   }finally{await app.close();}
