@@ -7,9 +7,9 @@ import {Jobs} from '../src/jobs.js';
 import {checkQuality} from '../src/quality.js';
 import {saveSnippet,composeInput,compareJobs} from '../src/prompt-lab.js';
 import {manageTrash} from '../src/trash.js';
-import {createWorkbench} from '../src/server.js';
+import {createWorkbench} from './source-fixtures.js';
 import {PromptLab} from '../public/lab.js';
-function store(){mkdirSync('work',{recursive:true});return new Store(mkdtempSync(path.resolve('work','lab-test-')));}
+function store(){mkdirSync('work',{recursive:true});return new Store(mkdtempSync(path.resolve(process.env.PW_TEST_ROOT||'work','lab-test-')));}
 function jobs(s,generator=async()=>({output:'自然光，保留动线'})){s.put('providers',{id:'mock',name:'模拟服务',protocol:'openai',baseUrl:'http://127.0.0.1:9999/v1',model:'test'});return new Jobs(s,{open:async()=>''},{withModel:async(p,run)=>run()},{generator});}
 const input={input:'保留自然光和动线',providerId:'mock',templateId:'optimize'};
 test('检查显示只输出转义文本，不把不可信计数或标签插入HTML',()=>{const lab=new PromptLab({});const html=lab.qualityMarkup({total:1,passed:'<img src="/icon.svg">',length:'<b>假字数</b>',items:[{label:'<script>注入</script>',pass:false}]});assert.ok(!html.includes('<img'));assert.ok(!html.includes('<script>'));assert.ok(html.includes('&lt;img'));});

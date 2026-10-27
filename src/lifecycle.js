@@ -97,12 +97,12 @@ export class Lifecycle {
     }
     this.started.delete(p.id);return {stopped:true};
   }
-  async withModel(p,fn,autoUnload=true){
+  async withModel(p,fn,autoUnload=true,onRelease){
     if(!['router','ollama','llama'].includes(p.protocol))return fn();
     return this.exclusive(async()=>{let release={released:false,reason:'已选择保持模型加载'},result;
       this.lastRelease=null;
       try{await this.load(p);result=await fn();}
-      finally{if(autoUnload){try{release=await this.unload(p);}catch(e){release={released:false,error:e.message};}}this.lastRelease=release;}
+      finally{if(autoUnload){try{release=await this.unload(p);}catch(e){release={released:false,error:e.message};}}this.lastRelease=release;onRelease?.(release);}
       return {...result,release};
     });
   }

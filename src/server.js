@@ -1,3 +1,12 @@
+import {GalleryDiscovery} from './gallery-discovery.js';
+import {StateSnapshot} from './state-snapshot.js';
+import {DataOperations} from './data-operations.js';
+import {SharedCollection} from './shared-collection.js';
+import {ConnectionManagement,connectionFingerprint} from './connection-management.js';
+import {Accounts} from './accounts.js';
+import {InboxQueue} from './inbox-queue.js';
+import {XTimeline} from './x-timeline.js';
+import {ImageBatch} from './image-batch.js';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,24 +30,30 @@ import {saveSnippet,composeInput,compareJobs,iterationChain,qualityRules} from '
 import {checkQuality} from './quality.js';
 
 const ROOT=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
-export async function createWorkbench({dataDir=path.join(ROOT,'data'),port=18765,store=new Store(dataDir),vault=new SecretVault(),lifecycle=new Lifecycle(dataDir),generator,sourceFetcher,imageFetcher,xFetcher}={}){
+export async function createWorkbench({dataDir=path.join(ROOT,'data'),port=18765,store=new Store(dataDir),vault=new SecretVault(),lifecycle=new Lifecycle(dataDir),generator,sourceFetcher,imageFetcher,xFetcher,accountFetcher,accountNow}={}){
   const token=randomBytes(32).toString('hex');const jobs=new Jobs(store,vault,lifecycle,{generator});
+  const stateSnapshot=new StateSnapshot(store),dataOperations=new DataOperations(store);
+  const accounts=new Accounts(store,vault,{fetcher:accountFetcher,now:accountNow,busy:()=>!!jobs.active||!!jobs.queue.length||lifecycle.locked});
+  jobs.resolveProvider=(p,signal)=>accounts.resolve(p,signal);
   const assetMedia=new AssetMedia(store);
+  const connections=new ConnectionManagement(store,jobs);
+  const imageBatch=new ImageBatch(store,jobs,assetMedia);jobs.onSuccess=job=>imageBatch.collect(job);
   const imageCache=new ImageCache(store,{fetcher:imageFetcher});
-  const sources=new Sources(store,{fetcher:sourceFetcher,imageVerifier:url=>imageCache.get(url)});
-  const inbox=new XInbox(store,{fetcher:xFetcher});
+  const sources=new Sources(store,{fetcher:sourceFetcher,imageVerifier:url=>imageCache.get(url)});const discovery=new GalleryDiscovery(store,jobs);
+  const sharedCollection=new SharedCollection(store,sources,imageCache,assetMedia);
+  const inbox=new XInbox(store,{fetcher:xFetcher});const inboxQueue=new InboxQueue(store,inbox);const timeline=new XTimeline(store,inboxQueue,{fetcher:xFetcher});
   const leaseKeys=p=>[...lifecycle.owned].filter(key=>key.startsWith(lifecycle.key({...p,model:''})));
   const leasedProvider=p=>{const prefix=lifecycle.key({...p,model:''}),key=leaseKeys(p)[0];return key?{...p,model:key.slice(prefix.length)}:p;};
-  const sameConnection=(a,b)=>!!a&&a.baseUrl===b.baseUrl&&a.protocol===b.protocol&&a.sealedKey===b.sealedKey;
+  const sameConnection=(a,b)=>!!a&&connectionFingerprint(a)===connectionFingerprint(b);
   const iniPath=process.env.PW_ROUTER_INI||'';
   for(const p of store.list('providers'))if(p.protocol==='router'&&p.baseUrl==='http://127.0.0.1:18180/v1'&&!store.get('modelLists',p.id)&&existsSync(iniPath)){
     const ids=[...readFileSync(iniPath,'utf8').matchAll(/^\[([^\]\r\n]+)\]\s*$/gm)].map(m=>m[1]).filter(id=>id!=='*');
     store.put('modelLists',{id:p.id,models:ids.map(id=>({id,status:'configured'})),source:'local-configuration',checkedAt:new Date().toISOString()});
   }
-  let stopping=false;
+  let stopping=false;const modelReadVersions=new Map();
   const json=(res,code,data)=>{res.writeHead(code,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});res.end(JSON.stringify(data));};
   const body=async req=>{req.setEncoding('utf8');let raw='',size=0;for await(const chunk of req){size+=Buffer.byteLength(chunk);if(size>((req.url==='/api/import'||req.url==='/api/assets/import')?320e6:14e6))throw new Error('请求过大，请缩小文件或分批导入');raw+=chunk;}if(!raw)return {};try{return JSON.parse(raw);}catch{throw new Error('JSON 格式无效');}};
-  const privateProvider=async id=>{const p=store.get('providers',id);if(!p)throw new Error('连接不存在');return {...p,apiKey:await vault.open(p.sealedKey)};};
+  const privateProvider=async id=>{const p=store.get('providers',id);if(!p)throw new Error('连接不存在');return accounts.resolve(p);};
   const server=http.createServer(async(req,res)=>{
     res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Referrer-Policy','no-referrer');res.setHeader('Cross-Origin-Resource-Policy','same-origin');
     res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'");
@@ -48,7 +63,7 @@ export async function createWorkbench({dataDir=path.join(ROOT,'data'),port=18765
     if(req.headers.origin&&!hosts.some(h=>req.headers.origin===`http://${h}`))return json(res,403,{error:'拒绝跨站访问'});
     if(route==='/health'&&req.method==='GET')return json(res,200,{app:'prompt-workbench',version:VERSION,instance:createHash('sha256').update((ROOT+'|'+store.dir).toLowerCase()).digest('hex').slice(0,16)});
     if(!route.startsWith('/api/')){
-      const files={'/':'index.html','/app.js':'app.js','/version.js':'version.js','/studio.js':'studio.js','/collections.js':'collections.js','/source-manager.js':'source-manager.js','/recycle.js':'recycle.js','/dialogs.js':'dialogs.js','/folders.js':'folders.js','/lab.js':'lab.js','/asset-import.js':'asset-import.js','/prompt-import.js':'prompt-import.js','/style.css':'style.css','/manifest.json':'manifest.json','/icon.svg':'icon.svg'};
+      const files={'/':'index.html','/app.js':'app.js','/connections.js':'connections.js','/account-login.js':'account-login.js','/version.js':'version.js','/recovery-gate.js':'recovery-gate.js','/service-exit.js':'service-exit.js','/studio.js':'studio.js','/management.css':'management.css','/settings.js':'settings.js','/collections.js':'collections.js','/source-manager.js':'source-manager.js','/recycle.js':'recycle.js','/dialogs.js':'dialogs.js','/folders.js':'folders.js','/lab.js':'lab.js','/asset-import.js':'asset-import.js','/prompt-import.js':'prompt-import.js','/image-batch.js':'image-batch.js','/style.css':'style.css','/manifest.json':'manifest.json','/icon.svg':'icon.svg'};
       if(req.method!=='GET'||!files[route])return json(res,404,{error:'页面不存在'});
       if(route==='/')res.setHeader('Set-Cookie',`pw_session=${token}; HttpOnly; SameSite=Strict; Path=/`);
       const name=files[route],types={html:'text/html',js:'text/javascript',css:'text/css',json:'application/json',svg:'image/svg+xml'};
@@ -66,7 +81,16 @@ export async function createWorkbench({dataDir=path.join(ROOT,'data'),port=18765
       if(linkedMedia&&req.method==='GET'){const row=assetMedia.linked(linkedMedia[1],linkedMedia[2]);let start=0,end=row.bytes-1,code=200;const range=req.headers.range;if(range){const m=range.match(/^bytes=(\d*)-(\d*)$/);if(!m||!m[1]&&!m[2]){res.writeHead(416,{'Content-Range':'bytes */'+row.bytes});return res.end();}if(!m[1])start=Math.max(0,row.bytes-Number(m[2]));else start=Number(m[1]);if(m[1]&&m[2])end=Math.min(end,Number(m[2]));if(!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||start> end||start>=row.bytes){res.writeHead(416,{'Content-Range':'bytes */'+row.bytes});return res.end();}code=206;res.setHeader('Content-Range','bytes '+start+'-'+end+'/'+row.bytes);}res.writeHead(code,{'Content-Type':row.type,'Content-Length':end-start+1,'Accept-Ranges':'bytes','Cache-Control':'no-store',...(url.searchParams.get('download')==='1'?{'Content-Disposition':"attachment; filename*=UTF-8''"+encodeURIComponent(row.name)}:{})});const stream=createReadStream(row.file,{start,end});stream.on('error',()=>res.destroy());res.on('close',()=>stream.destroy());return stream.pipe(res);}
       let b=req.method==='POST'?await body(req):{};
 
+      if(route==='/api/accounts/login'&&req.method==='POST')return json(res,200,await accounts.start(b));
+      const accountLogin=route.match(/^\/api\/accounts\/login\/([A-Za-z0-9-]+)$/);
+      if(accountLogin){if(req.method==='GET')return json(res,200,await accounts.status(accountLogin[1]));if(req.method==='DELETE')return json(res,200,accounts.cancel(accountLogin[1]));}
+      const accountSignout=route.match(/^\/api\/accounts\/([A-Za-z0-9-]+)\/signout$/);if(accountSignout&&req.method==='POST')return json(res,200,accounts.signout(accountSignout[1]));
+
       if(route==='/api/database'&&req.method==='GET')return json(res,200,store.diagnostics());
+      if(route==='/api/database/overview'&&req.method==='GET')return json(res,200,await dataOperations.overview({fresh:url.searchParams.get('refresh')==='1'}));
+      if(route==='/api/database/snapshots'&&req.method==='POST')return json(res,200,await dataOperations.snapshot());
+      const snapshotDownload=route.match(/^\/api\/database\/snapshots\/([^/]+)$/);
+      if(snapshotDownload&&req.method==='GET'){const file=dataOperations.snapshotFile(snapshotDownload[1]);res.writeHead(200,{'Content-Type':'application/vnd.sqlite3','Content-Disposition':'attachment; filename="'+snapshotDownload[1]+'"','Cache-Control':'no-store'});return createReadStream(file).on('error',()=>res.destroy()).pipe(res);}
       if(route==='/api/trash'&&req.method==='GET')return json(res,200,{items:trashItems(store)});
       if(route==='/api/trash/manage'&&req.method==='POST')return json(res,200,manageTrash(store,b));
       if(route==='/api/progress'&&req.method==='GET')return json(res,200,{revision:store.revision,activeJobId:jobs.active?.id,queued:jobs.queue.length,job:jobs.progress(url.searchParams.get('id'))});
@@ -79,15 +103,23 @@ export async function createWorkbench({dataDir=path.join(ROOT,'data'),port=18765
       if(route==='/api/compare'&&req.method==='GET')return json(res,200,compareJobs(store,url.searchParams.get('left'),url.searchParams.get('right')));
       if(route==='/api/chain'&&req.method==='GET')return json(res,200,iterationChain(store,url.searchParams.get('job')));
       if(route==='/api/templates/import'&&req.method==='POST'){if(b.schema!=='prompt-workbench/templates/v1'||!Array.isArray(b.templates)||!b.templates.length||b.templates.length>100)throw Error('模板导入格式无效，最多100条');store.backup();store.db.exec('BEGIN IMMEDIATE');try{for(const t of b.templates){const {id,builtin,revisions,deletedAt,...copy}=t;saveTemplate(store,copy);}store.db.exec('COMMIT');}catch(e){store.db.exec('ROLLBACK');throw e;}return json(res,200,{imported:b.templates.length});}
-      if(route==='/api/inbox'&&req.method==='GET')return json(res,200,{items:store.list('inbox')});
-      if(route==='/api/inbox/capture'&&req.method==='POST')return json(res,200,await inbox.capture(b.url));
+      if(route==='/api/inbox'&&req.method==='GET')return json(res,200,url.searchParams.get('cards')==='1'?store.inboxPage({query:url.searchParams.get('q')||'',scope:url.searchParams.get('scope')||'active',sort:url.searchParams.get('sort')||'captured',offset:url.searchParams.get('offset'),limit:url.searchParams.get('limit')}):{items:store.list('inbox')});
+      if(route==='/api/inbox/capture'&&req.method==='POST')return json(res,200,await inbox.capture(b.url,{refresh:b.refresh===true}));
+      if(route==='/api/inbox/batch'&&req.method==='GET')return json(res,200,{batch:inboxQueue.status(url.searchParams.get('id'))});
+      if(route==='/api/inbox/author'&&req.method==='GET')return json(res,200,timeline.state(url.searchParams.get('author')));
+      if(route==='/api/inbox/author/preview'&&req.method==='POST')return json(res,200,await timeline.preview(b));
+      if(route==='/api/inbox/author/capture'&&req.method==='POST')return json(res,200,timeline.capture(b));
+      if(route==='/api/inbox/author/discard'&&req.method==='POST')return json(res,200,timeline.discard(b));
+      if(route==='/api/inbox/batch'&&req.method==='POST')return json(res,202,inboxQueue.start(b));
+      const inboxBatchRoute=route.match(/^\/api\/inbox\/batch\/([a-f0-9-]+)\/(cancel|retry)$/);if(inboxBatchRoute&&req.method==='POST'){if(inboxBatchRoute[2]==='cancel')return json(res,200,inboxQueue.cancel(inboxBatchRoute[1]));const batch=inboxQueue.retry(inboxBatchRoute[1]);timeline.bindRetry(inboxBatchRoute[1],batch.id);return json(res,200,batch);}
+      const inboxDetail=route.match(/^\/api\/inbox\/([0-9]+|hh-(?:[a-f0-9]{12}|[0-9]{5,25}))$/);if(inboxDetail&&req.method==='GET'){const item=store.get('inbox',inboxDetail[1]);if(!item)throw Error('采集记录不存在');return json(res,200,item);}
       if(route==='/api/inbox/manage'&&req.method==='POST')return json(res,200,inbox.manage(b));
-      const inboxRoute=route.match(/^\/api\/inbox\/([0-9]+)\/(collect|image)$/);
+      const inboxRoute=route.match(/^\/api\/inbox\/([0-9]+|hh-(?:[a-f0-9]{12}|[0-9]{5,25}))\/(collect|image)$/);
       if(inboxRoute){const [,id,action]=inboxRoute;if(action==='collect'&&req.method==='POST')return json(res,200,inbox.collect(id,b));if(action==='image'&&req.method==='GET'){const item=store.get('inbox',id),p=item?.posts.find(p=>p.id===url.searchParams.get('post'));const media=p?.images[Number(url.searchParams.get('index'))||0];if(!media)throw Error('该帖子没有此图片');const img=await imageCache.get(media);res.writeHead(200,{'Content-Type':img.type,'Cache-Control':'no-store'});return res.end(img.data);}}
       if(route==='/api/templates/preview'&&req.method==='POST')return json(res,200,previewTemplate(b.template,b.variables||{}));
       const restoreTemplate=route.match(/^\/api\/templates\/([^/]+)\/restore$/);
       if(restoreTemplate&&req.method==='POST'){const t=store.get('templates',restoreTemplate[1]),v=!t?.deletedAt&&t?.revisions?.find(v=>v.revision===Number(b.revision));if(!v)throw Error('模板版本不存在');return json(res,200,saveTemplate(store,{...v,variableSchema:v.variableSchema||[],id:t.id,status:'draft'}));}
-      if(route==='/api/state'&&req.method==='GET')return json(res,200,{providers:store.list('providers').map(p=>store.publicProvider(p)),templates:store.list('templates').filter(t=>!t.deletedAt),revision:store.revision,assets:store.list('assets').map(a=>({...a,isResult:resultAsset(store,a)})),folders:store.list('folders'),modelLists:store.list('modelLists'),feeds:sources.catalog(),sourceBatch:sources.batchStatus(),jobs:store.jobPage({limit:250}).jobs,draft:store.get('drafts','workbench'),presets:PRESETS,activeJobId:jobs.active?.id,dataDir:store.dir});
+      if(route==='/api/state'&&req.method==='GET')return json(res,200,{...stateSnapshot.get(),revision:store.revision,feeds:sources.catalog(),galleryFeeds:sources.galleryCatalog(),galleryCandidates:sources.galleryCandidates(),sourceBatch:sources.batchStatus(),presets:PRESETS,activeJobId:jobs.active?.id,dataDir:store.dir});
       const historyFilters=()=>({query:String(url.searchParams.get('q')||'').slice(0,300),status:String(url.searchParams.get('status')||''),providerId:String(url.searchParams.get('provider')||''),trash:url.searchParams.get('trash')==='true'});
       if(route==='/api/history'&&req.method==='GET')return json(res,200,store.jobPage({...historyFilters(),offset:Math.max(0,Math.floor(Number(url.searchParams.get('offset'))||0)),limit:100}));
       if(route==='/api/history/manage'&&req.method==='POST'){
@@ -97,6 +129,8 @@ export async function createWorkbench({dataDir=path.join(ROOT,'data'),port=18765
         return json(res,200,bulkManage(store,'jobs',{...b,ids}));
       }
       if(route==='/api/assets/manage'&&req.method==='POST')return json(res,200,bulkManage(store,'assets',b));
+      const fillSharedMedia=route.match(/^\/api\/assets\/([^/]+)\/fill-shared-media$/);
+      if(fillSharedMedia&&req.method==='POST')return json(res,200,await sharedCollection.fill(fillSharedMedia[1]));
       if(route==='/api/assets/export'&&req.method==='POST'){const result=exportAssets(store,b.ids);return json(res,200,{...result,mediaFiles:assetMedia.exportFiles(result.assets)});}
       if(route==='/api/assets/import'&&req.method==='POST'){
         if(b.schema!=='prompt-workbench/assets/v1'||!Array.isArray(b.assets)||!b.assets.length||b.assets.length>1000)throw new Error('提示词导入文件格式无效，最多 1000 条');
@@ -114,14 +148,20 @@ export async function createWorkbench({dataDir=path.join(ROOT,'data'),port=18765
       if(folderRoute&&req.method==='DELETE'){
         const id=folderRoute[1];if(!store.get('folders',id))throw Error('文件夹不存在，请刷新后重试');store.backup();store.db.exec('BEGIN IMMEDIATE');try{for(const a of store.list('assets'))if(a.folderId===id)store.put('assets',{...a,folderId:''});store.remove('folders',id);store.db.exec('COMMIT');}catch(e){store.db.exec('ROLLBACK');throw e;}return json(res,200,{deleted:true,assetsPreserved:true});
       }
-      if(route==='/api/cache'&&req.method==='GET')return json(res,200,{...imageCache.stats(),publicEntries:sources.list({limit:1}).total});
+      if(route==='/api/cache'&&req.method==='GET')return json(res,200,{...imageCache.stats(),publicEntries:sources.galleryList({limit:1,kind:'all'}).total});
       if(route==='/api/cache/settings'&&req.method==='POST')return json(res,200,imageCache.configure(b));
       if(route==='/api/cache/clear'&&req.method==='POST')return json(res,200,await imageCache.clear({expiredOnly:b.expiredOnly===true}));
+      const galleryEdit=route.match(/^\/api\/gallery\/([^/]+)\/(metadata|analysis)$/);
+      if(galleryEdit){const [,id,action]=galleryEdit;if(action==='metadata'&&['GET','POST'].includes(req.method))return json(res,200,req.method==='POST'?discovery.save(id,b):discovery.detail(id));if(action==='analysis'&&req.method==='POST')return json(res,202,discovery.analyze(id,b));if(action==='analysis'&&req.method==='GET')return json(res,200,discovery.analysis(id,url.searchParams.get('job')));}
+      if(route==='/api/gallery'&&req.method==='GET')return json(res,200,sources.galleryList({model:url.searchParams.get('model')||'',purpose:url.searchParams.get('purpose')||'',style:url.searchParams.get('style')||'',author:url.searchParams.get('author')||'',from:url.searchParams.get('from')||'',to:url.searchParams.get('to')||'',timeField:url.searchParams.get('timeField')||'published',unknownDate:url.searchParams.get('unknownDate')==='1',source:String(url.searchParams.get('source')||''),query:String(url.searchParams.get('q')||'').slice(0,300),kind:String(url.searchParams.get('kind')||'images'),sort:String(url.searchParams.get('sort')||'latest'),limit:Number(url.searchParams.get('limit'))||50,offset:Math.max(0,Math.floor(Number(url.searchParams.get('offset'))||0))}));
       if(route==='/api/shared'&&req.method==='GET')return json(res,200,sources.list({source:String(url.searchParams.get('source')||''),query:String(url.searchParams.get('q')||'').slice(0,300),kind:String(url.searchParams.get('kind')||'all'),sort:String(url.searchParams.get('sort')||'latest'),limit:Number(url.searchParams.get('limit'))||20,offset:Math.max(0,Math.floor(Number(url.searchParams.get('offset'))||0))}));
       const feedRoute=route.match(/^\/api\/sources\/([^/]+)\/sync$/);
-      if(feedRoute&&req.method==='POST')return json(res,200,await sources.sync(feedRoute[1],{page:b.page}));
-      if(route==='/api/sources/batch'&&req.method==='POST')return json(res,202,sources.startBatch(b.ids));
-      if(route==='/api/sources/batch'&&req.method==='GET')return json(res,200,{...sources.batchStatus(),feeds:sources.catalog()});
+      if(feedRoute&&req.method==='POST')return json(res,200,await sources.sync(feedRoute[1],{page:b.page,mode:b.mode||'incremental'}));
+      if(route==='/api/sources/s38/references'&&req.method==='GET')return json(res,200,{items:store.list('shared').filter(r=>r.sourceId==='s38'&&r.referenceOnly)});
+      if(route==='/api/sources/s38/history'&&req.method==='POST')return json(res,200,await sources.syncHistory());
+      if(route==='/api/sources/batch'&&req.method==='POST')return json(res,202,sources.startBatch(b.ids,{mode:b.mode}));
+      if(route==='/api/sources/batch/cancel'&&req.method==='POST')return json(res,200,sources.cancelBatch(b.id));
+      if(route==='/api/sources/batch'&&req.method==='GET')return json(res,200,{...sources.batchStatus(),feeds:sources.catalog(),galleryFeeds:sources.galleryCatalog(),galleryCandidates:sources.galleryCandidates()});
       const sourceImport=route.match(/^\/api\/sources\/([^/]+)\/import$/);
       if(sourceImport&&req.method==='POST')return json(res,200,sources.importFile(sourceImport[1],b));
       const sharedRoute=route.match(/^\/api\/shared\/([^/]+)(?:\/(collect|template|image))?$/);
@@ -129,12 +169,14 @@ export async function createWorkbench({dataDir=path.join(ROOT,'data'),port=18765
         if(req.method==='GET'&&action==='image'){const item=store.get('shared',id);const index=Number(url.searchParams.get('index')||0);if(!Number.isInteger(index)||index<0||index>7)throw Error('图片序号无效');const imageUrl=item?.coverUrls?.length?item.coverUrls[index]:index===0?item?.coverUrl:'';if(!imageUrl)throw new Error('该条目没有此效果图');const feed=sources.feed(item.sourceId);const image=await imageCache.get(imageUrl,{allowDownload:feed.syncable!==false});res.writeHead(200,{'Content-Type':image.type,'Content-Length':image.data.length,'Cache-Control':'no-store','X-Image-Cache':image.cached?'HIT':'MISS'});return res.end(image.data);}
         if(req.method==='GET'&&!action)return json(res,200,await sources.detail(id));
         if(req.method==='POST'&&['collect','template'].includes(action)){
+          if(action==='collect')return json(res,200,await sharedCollection.collect(id));
           const item=await sources.detail(id);const provenance={sourceId:item.sourceId,originId:item.originId,url:item.sourceUrl,author:item.author,license:item.license};
           if(action==='template'){if(item.content.length>40000)throw new Error('条目超过模板长度，请先收藏后编辑精简');const existing=store.list('templates').find(t=>t.source?.sourceId===item.sourceId&&t.source.originId===item.originId);if(existing?.deletedAt){store.backup();return json(res,200,store.put('templates',{...existing,deletedAt:null}));}return json(res,200,existing||store.put('templates',{name:item.title.slice(0,100),category:'社区导入',system:item.content,user:'{{input}}',builtin:false,source:provenance}));}
-          const existing=store.list('assets').find(a=>a.source?.sourceId===item.sourceId&&a.source.originId===item.originId);if(existing?.deletedAt){store.backup();return json(res,200,store.put('assets',{...existing,deletedAt:null}));}
-          return json(res,200,existing||saveAsset(store,{title:item.title,content:item.content,negative:item.negative,modelHint:item.modelHint,tags:item.tags,category:'分享收藏',note:item.description,source:provenance}));
         }
       }
+      if(route==='/api/providers/overview'&&req.method==='GET')return json(res,200,connections.overview());
+      const connectionRoute=route.match(/^\/api\/providers\/([^/]+)\/(catalog|model-preferences|test)$/);
+      if(connectionRoute){const [,id,action]=connectionRoute;if(action==='catalog'&&req.method==='GET')return json(res,200,connections.catalog(id));if(action==='model-preferences'&&req.method==='POST')return json(res,200,connections.saveModel(id,b));if(action==='test'&&req.method==='POST')return json(res,202,connections.test(id,b));throw Error('连接操作方法无效');}
       const selection=route.match(/^\/api\/providers\/([^/]+)\/selection$/);
       if(selection&&req.method==='POST'){
         if(jobs.active||lifecycle.locked)throw new Error('请等当前任务或模型操作完成');const p=store.get('providers',selection[1]);if(!p)throw new Error('连接不存在');
@@ -142,24 +184,27 @@ export async function createWorkbench({dataDir=path.join(ROOT,'data'),port=18765
         const model=String(b.model||'').trim();if(!model||model.length>180)throw new Error('模型 ID 无效');return json(res,200,store.publicProvider(store.put('providers',{...p,model})));
       }
       if(route==='/api/providers'&&req.method==='POST'){
+        if(b.protocol==='account'||store.get('providers',String(b.id||''))?.protocol==='account')throw Error('账号连接请通过内置登录管理');
         if(jobs.active||lifecycle.locked)throw new Error('任务或模型操作执行中，连接配置暂不可修改');
         const old=store.get('providers',String(b.id||''));if(b.id&&!old)throw Error('连接不存在，请刷新后重新添加');if(old&&b.expectedUpdatedAt&&b.expectedUpdatedAt!==old.updatedAt)throw Error('连接已更新，请重新打开编辑');
         const p=validateProvider({id:old?.id,name:b.name,protocol:b.protocol,baseUrl:b.baseUrl,model:String(b.model||'').slice(0,180),timeoutMs:Math.min(1800000,Math.max(10000,Number(b.timeoutMs)||300000)),exePath:String(b.exePath||''),modelPath:String(b.modelPath||''),mmprojPath:String(b.mmprojPath||''),gpuLayers:Number(b.gpuLayers)||0,ctxSize:Number(b.ctxSize)||4096});
         if(old&&(leaseKeys(old).length||lifecycle.started.has(old.id)))throw new Error('请先释放模型并停止此连接服务，再编辑配置');
         Object.assign(p,validateProvider({...p,tokenField:b.tokenField||'auto',temperatureMode:b.temperatureMode||'auto'}));
         p.sealedKey=b.clearKey?null:b.apiKey?await vault.seal(String(b.apiKey).trim()):old?.sealedKey;
+        if(old?.modelPreferences)p.modelPreferences=old.modelPreferences;
         if(jobs.active||lifecycle.locked)throw Error('任务或模型操作执行中，连接配置暂不可修改');if(old&&store.get('providers',old.id)?.updatedAt!==old.updatedAt)throw Error('连接已更新，请重新打开编辑');if(old)store.remove('modelLists',old.id);
         return json(res,200,store.publicProvider(store.put('providers',p)));
       }
       if(route==='/api/models/discover'&&req.method==='POST'){
         const old=store.get('providers',String(b.id||'')),p=validateProvider({name:b.name||'连接',protocol:b.protocol,baseUrl:b.baseUrl,model:b.model||''});
-        p.apiKey=String(b.apiKey||'')||await vault.open(old?.sealedKey);
+        if(old?.protocol==='account'||b.protocol==='account')throw Error('账号模型请从已登录连接读取，不能通过自定义地址读取');
+        p.apiKey=b.clearKey?'':String(b.apiKey||'')||await vault.open(old?.sealedKey);
         try{return json(res,200,{models:await models(p)});}catch(e){throw new Error(p.apiKey?e.message.split(p.apiKey).join('[密钥已隐藏]'):e.message);}
       }
       const providerRoute=route.match(/^\/api\/providers\/([^/]+)\/(models|status|start|load|unload|stop)$/);
-      if(providerRoute){const [,id,action]=providerRoute;const p=await privateProvider(id);
+      if(providerRoute){const [,id,action]=providerRoute;const readVersion=['models','status'].includes(action)&&req.method==='GET'?(modelReadVersions.get(id)||0)+1:null;if(readVersion!==null)modelReadVersions.set(id,readVersion);if(store.get('providers',id)?.protocol==='account'&&!['models','status'].includes(action))throw Error('账号连接不使用本地模型启停操作');const p=await privateProvider(id);
         if(['models','status'].includes(action)&&req.method==='GET'){
-          try{const result=action==='models'?{models:await models(p)}:await lifecycle.status(leasedProvider(p));if(action==='models'){if(!sameConnection(store.get('providers',p.id),p))throw new Error('连接已更改，请重新读取模型列表');store.put('modelLists',{id:p.id,models:result.models.slice(0,2000),checkedAt:new Date().toISOString()});}if(result.error&&p.apiKey)result.error=result.error.split(p.apiKey).join('[密钥已隐藏]');return json(res,200,result);}catch(e){throw new Error(p.apiKey?e.message.split(p.apiKey).join('[密钥已隐藏]'):e.message);}
+          const started=performance.now();try{const result=action==='models'?{models:await models(p),online:true}:await lifecycle.status(leasedProvider(p));if(!sameConnection(store.get('providers',p.id),p))throw new Error('连接已更改，请重新读取模型列表');if(result.error&&p.apiKey)result.error=result.error.split(p.apiKey).join('[密钥已隐藏]');if(readVersion!==modelReadVersions.get(id))return json(res,200,{...result,stale:true});if(result.models&&result.online)store.put('modelLists',{id:p.id,models:result.models.slice(0,2000),checkedAt:new Date().toISOString()});result.check=connections.recordCheck(p,result,performance.now()-started);return json(res,200,result);}catch(e){const message=p.apiKey?e.message.split(p.apiKey).join('[密钥已隐藏]'):e.message;if(readVersion===modelReadVersions.get(id)&&sameConnection(store.get('providers',p.id),p))connections.recordCheck(p,{online:false,error:message},performance.now()-started);throw new Error(message);}
         }
         if(req.method!=='POST')throw new Error('生命周期操作需要 POST');
         if(jobs.active)throw new Error('请先完成或取消正在执行的任务');
@@ -172,6 +217,9 @@ export async function createWorkbench({dataDir=path.join(ROOT,'data'),port=18765
         const mediaSelection=assetMedia.resolve(b.media,b.id,b.copyOf);store.backup();const asset=saveAsset(store,b,{mediaSelection});assetMedia.committed(b.media);return json(res,200,asset);
       }
       if(route==='/api/draft'&&req.method==='POST'){return json(res,200,store.put('drafts',{id:'workbench',source:provenance(b.source),input:String(b.input||'').slice(0,60000),snippetIds:Array.isArray(b.snippetIds)?b.snippetIds.filter(id=>typeof id==='string').slice(0,20):[],snippetVersions:b.snippetVersions&&typeof b.snippetVersions==='object'&&!Array.isArray(b.snippetVersions)?Object.fromEntries(Object.entries(b.snippetVersions).slice(0,20).filter(([k,v])=>k.length<=100&&typeof v==='string'&&v.length<=100)): {},qualityRules:qualityRules(b.qualityRules),model:String(b.model||'').slice(0,180),templateId:b.templateId,providerId:b.providerId,variables:b.variables||{},autoUnload:b.autoUnload!==false,stream:b.stream!==false,temperature:Number.isFinite(Number(b.temperature))?Math.min(2,Math.max(0,Number(b.temperature))):0.6,maxTokens:Number(b.maxTokens)||1024}));}
+      if(route==='/api/image-batch'&&req.method==='POST')return json(res,202,imageBatch.enqueue(b));
+      const imageBatchRead=route.match(/^\/api\/image-batch\/([A-Za-z0-9-]+)$/);if(imageBatchRead&&req.method==='GET')return json(res,200,{batchId:imageBatchRead[1],jobs:imageBatch.rows(imageBatchRead[1])});
+      const imageBatchCancel=route.match(/^\/api\/image-batch\/([A-Za-z0-9-]+)\/cancel$/);if(imageBatchCancel&&req.method==='POST')return json(res,200,imageBatch.cancel(imageBatchCancel[1]));
       if(route==='/api/jobs'&&req.method==='POST')return json(res,202,jobs.enqueue(b));
       if(route==='/api/batch'&&req.method==='POST'){
         if(!Array.isArray(b.inputs)||!b.inputs.length||b.inputs.length>50)throw new Error('每批需要 1–50 条输入');
@@ -180,21 +228,22 @@ export async function createWorkbench({dataDir=path.join(ROOT,'data'),port=18765
         for(const input of b.inputs){if(typeof input!=='string'||!input.trim()||input.length>60000)throw new Error('批量输入无效');}
         return json(res,202,{jobs:jobs.enqueueBatch(b.inputs.map(input=>({...b,input,images:[]})))});
       }
-      const jobRoute=route.match(/^\/api\/jobs\/([^/]+)(?:\/(cancel|retry))?$/);
+      const jobRoute=route.match(/^\/api\/jobs\/([^/]+)(?:\/(cancel|retry|archive))?$/);
       if(jobRoute){const [,id,action]=jobRoute;const j=store.get('jobs',id);if(!j)throw new Error('任务不存在');
         if(req.method==='GET'&&!action)return json(res,200,j);
+        if(req.method==='POST'&&action==='archive')return json(res,200,imageBatch.collect(j));
         if(req.method==='POST'&&action==='cancel')return json(res,200,jobs.cancel(id));
         if(req.method==='POST'&&action==='retry'){if(['running','queued','cancelling'].includes(j.status))throw new Error('任务尚未结束');return json(res,202,jobs.retry(id));}
       }
       const deletion=route.match(/^\/api\/(templates|assets|providers)\/([^/]+)$/);
       if(deletion&&req.method==='DELETE'){if(jobs.active||jobs.queue.length||lifecycle.locked)throw new Error('任务或模型操作尚未完成，暂不可删除');const [,kind,id]=deletion;if(kind==='providers'){const p=store.get(kind,id);if(p&&(leaseKeys(p).length||lifecycle.started.has(id)))throw new Error('请先释放模型并停止服务');}const record=store.get(kind,id);if(!record)throw Error('记录不存在');store.backup();if(kind==='providers')store.remove(kind,id);else store.put(kind,{...record,deletedAt:new Date().toISOString()});return json(res,200,{deleted:true,recoverable:kind!=='providers'});}
-      if(route==='/api/export'&&req.method==='GET'){const result=store.export();return json(res,200,{...result,mediaFiles:assetMedia.exportFiles(result.assets)});}
+      if(route==='/api/export'&&req.method==='GET'){const result=store.export();return json(res,200,{...result,mediaFiles:assetMedia.exportFiles([...result.assets,...result.jobs.map(j=>({media:j.originalMedia||[]}))])});}
       if(route==='/api/backup'&&req.method==='POST')return json(res,200,{file:store.backup()});
       if(route==='/api/import'&&req.method==='POST'){
         if(jobs.active||jobs.queue.length)throw new Error('任务执行中不能恢复');
         for(const p of b.providers||[])validateProvider(p);
         for(const t of b.templates||[])if(typeof t.system!=='string'||typeof t.user!=='string'||!t.name)throw new Error('备份模板无效');
-        const importedMedia=assetMedia.importFiles(b.mediaFiles);try{assetMedia.validateReferences(b.assets||[]);return json(res,200,store.import(b));}catch(e){assetMedia.rollbackImport(importedMedia);throw e;}
+        const importedMedia=assetMedia.importFiles(b.mediaFiles);try{assetMedia.validateReferences([...(b.assets||[]),...(b.jobs||[]).map(j=>({media:j.originalMedia||[]}))]);return json(res,200,store.import(b));}catch(e){assetMedia.rollbackImport(importedMedia);throw e;}
       }
       if(route==='/api/shutdown'&&req.method==='POST'){json(res,200,{stopping:true});setImmediate(()=>close());return;}
       return json(res,404,{error:'接口不存在'});
@@ -202,13 +251,15 @@ export async function createWorkbench({dataDir=path.join(ROOT,'data'),port=18765
   });
   server.requestTimeout=30000;
   async function close(){if(stopping)return;stopping=true;const done=await jobs.shutdown();if(!done){stopping=false;jobs.closing=false;console.error('任务仍在释放模型，工作台暂未退出，请稍后重试关闭');return;}
+    await accounts.close();await inboxQueue.close();await dataOperations.settle();
     const inboxDeadline=Date.now()+20000;while(inbox.busy.size&&Date.now()<inboxDeadline)await new Promise(r=>setTimeout(r,100));if(inbox.busy.size){stopping=false;jobs.closing=false;console.error('X读取尚未结束，请稍后关闭');return;}
+    await Promise.allSettled([...sharedCollection.pending.values()]);
     await sources.close();await Promise.allSettled([...imageCache.pending.values(),...assetMedia.pending]);
     for(const saved of store.list('providers'))try{const p=leasedProvider(saved);if(leaseKeys(p).length)await lifecycle.exclusive(()=>lifecycle.unload(p));if(lifecycle.started.has(p.id))await lifecycle.exclusive(()=>lifecycle.stop(p));}catch(e){console.error('释放未确认：'+e.message);}
     store.backup();await new Promise(r=>server.close(r));store.close();
   }
   await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,'127.0.0.1',resolve);});
-  return {server,store,jobs,lifecycle,sources,imageCache,assetMedia,inbox,close,port:server.address().port};
+  return {server,store,jobs,lifecycle,sources,imageCache,assetMedia,inbox,inboxQueue,timeline,close,port:server.address().port};
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
   const app=await createWorkbench({dataDir:process.env.PW_DATA_DIR||path.join(ROOT,'data'),port:Number(process.env.PW_PORT)||18765});

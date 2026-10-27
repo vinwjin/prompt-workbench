@@ -4,10 +4,10 @@ import { mkdirSync,mkdtempSync } from 'node:fs';
 import path from 'node:path';
 import { Store } from '../src/store.js';
 import { bulkManage,saveAsset } from '../src/library.js';
-import { Sources,parseCSV } from '../src/sources.js';
-import { createWorkbench } from '../src/server.js';
+import { Sources,parseCSV } from './source-fixtures.js';
+import { createWorkbench } from './source-fixtures.js';
 import http from 'node:http';
-const temp=()=>{mkdirSync('work',{recursive:true});return mkdtempSync(path.resolve('work','collection-'));};
+const temp=()=>{mkdirSync('work',{recursive:true});return mkdtempSync(path.resolve(process.env.PW_TEST_ROOT||'work','collection-'));};
 
 test('CSV 支持多行与双引号；格式变动不静默导入',()=>{
   assert.equal(parseCSV('act,prompt\r\n"名称","第一行\n第二行，""引号"""\r\n')[0].prompt,'第一行\n第二行，“引号”'.replace('“','"').replace('”','"'));
@@ -22,9 +22,9 @@ test('文件夹、星标与回收站持久保存；清理不改变运行任务�
   bulkManage(s,'assets',{ids:[a.id],action:'restore'});assert.equal(s.get('assets',a.id).negative,'抖动');assert.equal(s.get('assets',a.id).favorite,true);bulkManage(s,'jobs',{ids:['done'],action:'restore'});assert.equal(s.jobPage({status:'succeeded'}).total,1);
   const old=s.export();delete old.folders;assert.doesNotThrow(()=>s.import(old));s.close();
 });
-test('公开版同步失败保留缓存；受限来源详情不联网，人工内容可读取',async()=>{const s=new Store(temp());let calls=0;const sources=new Sources(s,{fetcher:async()=>{calls++;throw Error('offline');}});try{sources.ingest('shortcut',JSON.stringify([{id:1,zh:{title:'写作',prompt:'正文',remark:'描述'}}]));await assert.rejects(sources.sync('shortcut'),/缓存/);assert.equal(sources.list({source:'shortcut'}).total,1);const before=calls;sources.ingest('mother',JSON.stringify({success:true,result:{total:1,datas:[{id:1,title:'合成画面'}]}}));const id=sources.list({source:'mother'}).items[0].id;await assert.rejects(sources.detail(id),/权限/);assert.equal(calls,before);sources.importFile('mother',{text:'完整的合成测试正文，仅用于本地验证。',fileName:'synthetic.txt'});const row=sources.list({source:'mother'}).items[0];assert.equal((await sources.detail(row.id)).importedFrom,'local-file');assert.equal(calls,before);}finally{await sources.close();s.close();}});
+test('公开版同步失败保留缓存；详情请求失败保留缓存，人工内容可离线读取',async()=>{const s=new Store(temp());let calls=0;const sources=new Sources(s,{fetcher:async()=>{calls++;throw Error('offline');}});try{sources.ingest('shortcut',JSON.stringify([{id:1,zh:{title:'写作',prompt:'正文',remark:'描述'}}]));await assert.rejects(sources.sync('shortcut'),/缓存/);assert.equal(sources.list({source:'shortcut'}).total,1);const before=calls;sources.ingest('mother',JSON.stringify({success:true,result:{total:1,datas:[{id:1,title:'合成画面'}]}}));const id=sources.list({source:'mother'}).items[0].id;await assert.rejects(sources.detail(id),/offline/);assert.equal(calls,before+1);sources.importFile('mother',{text:'完整的合成测试正文，仅用于本地验证。',fileName:'synthetic.txt'});const row=sources.list({source:'mother'}).items[0];assert.equal((await sources.detail(row.id)).importedFrom,'local-file');assert.equal(calls,before+1);}finally{await sources.close();s.close();}});
 
-test('公开版受限来源单个及批量同步拒绝且零网络，既有缓存保留',async()=>{const s=new Store(temp());let calls=0;const sources=new Sources(s,{fetcher:async()=>{calls++;throw Error('unexpected');}});try{sources.ingest('mother',JSON.stringify({success:true,result:{total:1,datas:[{id:1,title:'合成记录'}]}}));await assert.rejects(sources.sync('mother'),/权限/);sources.startBatch(['mother','s09','s12','s30']);await sources.batchTask;assert.equal(sources.batchStatus().skipped,4);assert.equal(calls,0);assert.equal(sources.list({source:'mother'}).total,1);}finally{await sources.close();s.close();}});
+test('公开版受限来源单个及批量同步拒绝且零网络，既有缓存保留',async()=>{const s=new Store(temp());let calls=0;const sources=new Sources(s,{fetcher:async()=>{calls++;throw Error('unexpected');}});try{sources.ingest('mother',JSON.stringify({success:true,result:{total:1,datas:[{id:1,title:'合成记录'}]}}));await assert.rejects(sources.sync('s12'),/权限/);sources.startBatch(['s09','s12','s30']);await sources.batchTask;assert.equal(sources.batchStatus().skipped,3);assert.equal(calls,0);assert.equal(sources.list({source:'mother'}).total,1);}finally{await sources.close();s.close();}});
 
 test('主页面选择的模型进入任务；列表只读不计费；分享收藏去重并保留来源',async()=>{
   let generatedModel='',generations=0;const modelServer=http.createServer((req,res)=>{res.setHeader('Content-Type','application/json');res.end(JSON.stringify({data:[{id:'model-a'},{id:'model-b'}]}));});await new Promise(r=>modelServer.listen(0,'127.0.0.1',r));

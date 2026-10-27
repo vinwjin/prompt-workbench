@@ -3,10 +3,10 @@ import assert from 'node:assert/strict';
 import { mkdirSync,mkdtempSync } from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
-import { createWorkbench } from '../src/server.js';
+import { createWorkbench } from './source-fixtures.js';
 import { Lifecycle } from '../src/lifecycle.js';
 import { setTimeout as sleep } from 'node:timers/promises';
-const dir=()=>{mkdirSync('work',{recursive:true});return mkdtempSync(path.resolve('work','integration-'));};
+const dir=()=>{mkdirSync('work',{recursive:true});return mkdtempSync(path.resolve(process.env.PW_TEST_ROOT||'work','integration-'));};
 async function session(app){const url=`http://127.0.0.1:${app.port}`;const root=await fetch(url);const cookie=root.headers.get('set-cookie').split(';')[0];return async(route,body,options={})=>{const response=await fetch(url+'/api/'+route,{method:body?'POST':'GET',headers:{Cookie:cookie,...(body?{'Content-Type':'application/json'}:{}),...options.headers},body:body?JSON.stringify(body):undefined});return {status:response.status,data:await response.json()};};}
 async function until(fn,timeout=5000){const end=Date.now()+timeout;while(Date.now()<end){const r=await fn();if(r)return r;await sleep(20);}throw new Error('test timeout');}
 

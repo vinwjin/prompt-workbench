@@ -8,7 +8,7 @@ import { SecretVault } from '../src/secrets.js';
 import { buildGeneration,validateProvider,generate } from '../src/providers.js';
 import http from 'node:http';
 
-export function temp(){return mkdtempSync(path.join(path.resolve('work'),'test-'));}
+export function temp(){return mkdtempSync(path.join(path.resolve(process.env.PW_TEST_ROOT||'work'),'test-'));}
 test('模板变量缺失阻止请求，正文中的花括号不会二次解释',()=>{
   assert.throws(()=>renderTemplate({system:'{{role}}',user:'{{input}}'},{input:'abc'}),/role/);
   assert.deepEqual(renderTemplate({system:'编辑',user:'{{input}}'},{input:'{{secret}}'}),{system:'编辑',user:'{{secret}}'});

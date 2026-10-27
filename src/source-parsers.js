@@ -1,4 +1,5 @@
 import {createHash} from 'node:crypto';
+import {sourceVideoUrl} from './gallery-policy.js';
 import {repoMedia} from './source-media.js';
 const digest=s=>createHash('sha256').update(s).digest('hex').slice(0,24);
 export function sourceLink(raw){try{const u=new URL(raw);return u.protocol==='https:'&&!u.username&&!u.password&&!u.port?u.href:'';}catch{return '';}}
@@ -7,7 +8,7 @@ const plain=s=>decodeHtml(String(s).replace(/<br\s*\/?\s*>/gi,'\n').replace(/<[^
 const titleText=s=>plain(s.replace(/\[([^\]]+)\]\([^)]*\)/g,'$1').replace(/[*_`]/g,''));
 export function parseSourceJson(text,feed){const data=JSON.parse(text),rows=Array.isArray(data)?data:data?.prompts||data?.items||((data?.prompt||data?.content||data?.positive_prompt)?[data]:null);if(!Array.isArray(rows)||rows.some(r=>!r||typeof r!=='object'))throw Error('来源JSON没有有效条目数组');return rows.map(r=>{
   const content=typeof r.prompt_zh==='string'&&r.prompt_zh.trim()?r.prompt_zh:typeof r.prompt==='string'?r.prompt:r.content||r.positive_prompt||r.positive||'';
-  return {id:r.id,originId:r.source_url||r.sourceUrl||r.id,title:r.title_zh||r.title||r.act||r.cmd||String(content).slice(0,70),content,negative:r.negative_prompt||r.negative||'',author:r.author_name||r.author||r.contributor||feed.name,sourceUrl:sourceLink(r.source_url||r.sourceUrl)||feed.url,frontCover:feed.contentKind==='images'?repoMedia(r.image_url||r.image||r.images?.[0],feed):'',modelHint:r.model||r.modelHint||'',tags:r.categories||r.tags||[],license:r.license?`${r.license} · 上游逐条标注；原作者权利另核`:feed.license,description:feed.notice};
+  return {id:r.id,originId:r.source_url||r.sourceUrl||r.id,title:r.title_zh||r.title||r.act||r.cmd||String(content).slice(0,70),content,videoUrl:feed.id==='s31'?sourceVideoUrl(r.videoUrl||r.video_url):'',negative:r.negative_prompt||r.negative||'',author:r.author_name||r.author||r.contributor||feed.name,sourceUrl:sourceLink(r.source_url||r.sourceUrl)||feed.url,frontCover:feed.contentKind==='images'?repoMedia(r.image_url||r.image||r.images?.[0],feed):'',modelHint:r.model||r.modelHint||'',tags:r.categories||r.tags||[],license:r.license?`${r.license} · 上游逐条标注；原作者权利另核`:feed.license,description:feed.notice};
 }).filter(r=>typeof r.content==='string'&&r.content.trim());}
 
 // 只读取文本/JSON/YAML提示词块；代码围栏内的标题不会被当成目录。
@@ -25,7 +26,8 @@ export function parseSourceMarkdown(text,feed,file=feed.path||'README.md'){
     const images=[...body.matchAll(/(?:src="|!\[[^\]]*\]\()([^"\s)]+)(?:"|\))/g)].map(m=>m[1]);
     const frontCover=feed.contentKind==='images'?images.map(u=>repoMedia(u,feed,file)).find(Boolean)||'':'';
     const coverUrls=feed.id==='s11'?images.map(u=>repoMedia(u,feed,file)).filter(Boolean).slice(0,2):[];
-    rows.push({originId:origin||file+'#'+digest(section.title+'\n'+content),title:section.title,content,frontCover,coverUrls,imageLabels:feed.id==='s11'?['Nano Banana 2','GPT Image 2']:[],sourceUrl:origin||`${feed.url}/blob/main/${file}`,author:origin?'@'+new URL(origin).pathname.split('/')[1]:feed.name,modelHint:feed.id==='s11'?'Nano Banana 2 · 详情可看对比图':feed.contentKind==='images'?'原案例模型见出处':'文字模板 · 适用模型见原文',description:feed.notice});
+    const videoUrl=feed.id==='s31'?sourceVideoUrl(body.match(/https:\/\/video\.twimg\.com\/[^"\s)<]+/g)?.find(u=>sourceVideoUrl(u))):'';
+    rows.push({videoUrl,originId:origin||file+'#'+digest(section.title+'\n'+content),title:section.title,content,frontCover,coverUrls,imageLabels:feed.id==='s11'?['Nano Banana 2','GPT Image 2']:[],sourceUrl:origin||`${feed.url}/blob/main/${file}`,author:origin?'@'+new URL(origin).pathname.split('/')[1]:feed.name,modelHint:feed.id==='s31'?'Kling 3.0':feed.id==='s11'?'Nano Banana 2 · 详情可看对比图':feed.contentKind==='images'?'原案例模型见出处':'文字模板 · 适用模型见原文',description:feed.notice});
   }
   return rows;
 }
