@@ -1,0 +1,31 @@
+import {execFileSync} from 'node:child_process';
+import {readFileSync,writeFileSync,mkdirSync,lstatSync,mkdtempSync,readdirSync} from 'node:fs';
+import {createHash} from 'node:crypto';
+import path from 'node:path';
+import assert from 'node:assert/strict';
+import {removeOwnedArtifact} from './test-artifacts.mjs';
+const {version}=JSON.parse(readFileSync('package.json','utf8'));
+const tag=process.env.GITHUB_REF_NAME||`v${version}`;
+assert.equal(tag,`v${version}`,'发布标签必须与程序版本一致');
+const commit=execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim();
+const files=execFileSync('git',['ls-files','-z'],{encoding:'utf8'}).split('\0').filter(Boolean).sort();
+const sha=bytes=>createHash('sha256').update(bytes).digest('hex');
+for(const file of files)assert(!lstatSync(file).isSymbolicLink());
+const out=path.resolve('artifacts');mkdirSync(out,{recursive:true});
+const stem=`prompt-workbench-${version}`;
+execFileSync('git',['archive','--format=zip',`--prefix=${stem}/`,'-o',path.join(out,stem+'.zip'),'HEAD']);
+// git archive may apply eol attributes. Hash the actual package, never the working tree.
+mkdirSync('work',{recursive:true});
+const readback=mkdtempSync(path.resolve('work','release-readback-'));
+if(process.platform==='win32')execFileSync('powershell.exe',['-NoProfile','-NonInteractive','-Command','Expand-Archive -LiteralPath $env:PW_RELEASE_ZIP -DestinationPath $env:PW_RELEASE_READBACK'],{windowsHide:true,env:{...process.env,PW_RELEASE_ZIP:path.join(out,stem+'.zip'),PW_RELEASE_READBACK:readback}});
+else execFileSync('unzip',['-q',path.join(out,stem+'.zip'),'-d',readback]);
+const extracted=path.join(readback,stem);
+const archiveFiles=[];
+function walk(dir,prefix=''){for(const entry of readdirSync(dir,{withFileTypes:true})){const relative=prefix+entry.name;assert(!entry.isSymbolicLink());if(entry.isDirectory())walk(path.join(dir,entry.name),relative+'/');else archiveFiles.push(relative);}}
+walk(extracted);assert.deepEqual(archiveFiles.sort(),files,'ZIP must contain exactly approved tracked files');
+const manifest=files.map(file=>{const bytes=readFileSync(path.join(extracted,file));return {path:file,size:bytes.length,sha256:sha(bytes)};});
+writeFileSync(path.join(out,stem+'.manifest.json'),JSON.stringify({version,tag,commit,files:manifest},null,2)+'\n');
+const assets=[stem+'.zip',stem+'.manifest.json'];
+writeFileSync(path.join(out,'SHA256SUMS'),assets.map(f=>sha(readFileSync(path.join(out,f)))+'  '+f).join('\n')+'\n');
+removeOwnedArtifact(readback);
+console.log(`发布包：${version}，${files.length}文件，提交${commit}`);

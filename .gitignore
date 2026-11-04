@@ -12,3 +12,5 @@ artifacts/
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
+
+outputs/

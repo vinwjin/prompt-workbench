@@ -1,5 +1,6 @@
 const ACTIVE=new Set(['running','queued','cancelling']);
 import {mediaMetadata} from './asset-media.js';
+import {collectionMedia} from './collection-media.js';
 export function normalizeTags(raw){const values=String(raw||'').split(/[,，;；\n]/).map(t=>t.trim()).filter(Boolean);const seen=new Set(),tags=[];for(const t of values){if(t.length>40)throw Error('单个标签最多40字');const key=t.toLocaleLowerCase();if(!seen.has(key)){tags.push(t);seen.add(key);}}if(tags.length>30||tags.join(', ').length>500)throw Error('标签最多30项，合计最多500字');return tags.join(', ');}
 export function resultRecord(raw,content){if(!raw||raw.status!=='succeeded'||typeof raw.jobId!=='string'||! /^[A-Za-z0-9_-]{1,100}$/.test(raw.jobId)||raw.output!==content)return null;return {jobId:raw.jobId,status:'succeeded',output:content,model:String(raw.model||'').slice(0,200),templateName:String(raw.templateName||'').slice(0,100),finishedAt:String(raw.finishedAt||'').slice(0,100)};}
 export function resultAsset(store,a){return !a.source||!!resultRecord(a.resultRecord,a.content)||!!a.resultJobId&&store.get('jobs',a.resultJobId)?.status==='succeeded';}
@@ -34,7 +35,8 @@ export function saveAsset(store,b,{allowResultRecord=false,mediaSelection}={}){
   const folderId=String(b.folderId??old?.folderId??'');if(folderId&&!store.get('folders',folderId))throw new Error('文件夹不存在');
   const negative=String(b.negative??old?.negative??'').slice(0,50000);
   const media=mediaMetadata(mediaSelection??old?.media??copied?.media??[]);
+  const collectedMedia=collectionMedia(archiveSource?.collectionMedia||(allowResultRecord?b.collectionMedia:null));
   const versions=old&&(old.content!==b.content||(old.negative||'')!==negative)?[{content:old.content,negative:old.negative||'',at:old.updatedAt},...(old.versions||[])].slice(0,30):old?.versions||[];
   const importInfo=b.importInfo?{fileName:String(b.importInfo.fileName||'').slice(0,180),encoding:String(b.importInfo.encoding||'').slice(0,30),raw:String(b.importInfo.raw||'').slice(0,100000)}:old?.importInfo||copied?.importInfo||null;
-  return store.put('assets',{...old,id:old?.id,resultRecord:record,resultJobId:resultJobId||null,title:b.title.trim().slice(0,150),content:b.content,negative,media,importInfo,category:String(b.category??old?.category??'未分类').slice(0,50),tags:normalizeTags(b.tags??old?.tags),note:String(b.note||'').slice(0,3000),modelHint:String(b.modelHint??old?.modelHint??'').slice(0,200),folderId,favorite:b.favorite===undefined?old?.favorite===true:b.favorite===true,source:provenance(old?.source||b.source),versions,createdAt:old?.createdAt||new Date().toISOString()});
+  return store.put('assets',{...old,id:old?.id,resultRecord:record,resultJobId:resultJobId||null,title:b.title.trim().slice(0,150),content:b.content,negative,media,collectionMedia:collectedMedia,importInfo,category:String(b.category??old?.category??'未分类').slice(0,50),tags:normalizeTags(b.tags??old?.tags),note:String(b.note||'').slice(0,3000),modelHint:String(b.modelHint??old?.modelHint??'').slice(0,200),folderId,favorite:b.favorite===undefined?old?.favorite===true:b.favorite===true,source:provenance(old?.source||b.source),versions,createdAt:old?.createdAt||new Date().toISOString()});
 }

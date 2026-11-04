@@ -70,3 +70,8 @@
 - [ai-boost/awesome-prompts](https://github.com/ai-boost/awesome-prompts/blob/main/LICENSE)：3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986
 - [imagineVid/Awesome-kling-3-0-prompts-and-skills](https://github.com/imagineVid/Awesome-kling-3-0-prompts-and-skills/blob/main/LICENSE)：a7225d634a3cf371c4a58efeab3795c5d31c75f3165d2e193e6dd0c00f997334
 - [Reviral-ai/awesome-kling-prompts](https://github.com/Reviral-ai/awesome-kling-prompts/blob/main/LICENSE)：f549a8c076fcdaf7a0d1a3dd3ad158cc6dedd2286fd68d6676924f4e58a023cb
+
+
+2026-10-27：目录扩至40项，新增S38／S39 OpenNana图片视频及S40相关视频仓库登记；公开版均仅原站／有权文件导入。mother仍禁止公开包自动正文和图片下载，已有本机导入内容／缓存可用，不覆盖个人收藏。来源目录不打包条目正文或媒体。
+
+2026-11-04：共41项登记，新增S41花花AI小栈成人向来源（https://huahuanook.com/），未核实自动访问／再分发许可，公开版禁自动同步，保留有权文件导入；不附第三方正文或媒体。参考库入口与限制见THIRD_PARTY_NOTICES.md，源目录不代表服务稳定性或授权保证。

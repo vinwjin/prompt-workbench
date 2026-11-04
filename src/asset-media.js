@@ -19,6 +19,17 @@ export function mediaMetadata(rows=[]){
 export class AssetMedia{
   constructor(store){this.store=store;this.dir=path.join(store.dir,'media','assets');mkdirSync(this.dir,{recursive:true});this.staged=new Map();this.pending=new Set();this.transient=new Set();}
   file(id){if(!/^[a-f0-9]{64}$/.test(id))throw Error('素材ID无效');return path.join(this.dir,id+'.bin');}
+  // 把生成结果等二进制图片写入内容寻址存储，返回 {id,type,bytes,name}。仅供本机生成结果落盘，不参与待确认 staging。
+  save(name,data){
+    if(!Buffer.isBuffer(data))data=Buffer.from(data);
+    const type=mediaType(data.subarray(0,512));
+    if(!type.startsWith('image/'))throw Error('生成结果不是支持的图片');
+    if(data.length>20*MB)throw Error('生成结果图片超过20MB');
+    const id=createHash('sha256').update(data).digest('hex');
+    const file=this.file(id);
+    if(!existsSync(file)){const temp=file+'.part';writeFileSync(temp,data);renameSync(temp,file);}
+    return {id,name:String(name||'生成图').replace(/[\\/\x00-\x1f]/g,'_').slice(0,180),type,bytes:data.length};
+  }
   metadata(id,name){const file=this.file(id),data=readFileSync(file);if(createHash('sha256').update(data).digest('hex')!==id)throw Error('素材文件校验失败');return {id,name:name.slice(0,180),type:mediaType(data.subarray(0,512)),bytes:data.length};}
   async upload(req,name){const task=this.receive(req,name);this.pending.add(task);try{return await task;}finally{this.pending.delete(task);}}
   async receive(req,name){
@@ -32,11 +43,30 @@ export class AssetMedia{
     const result=rows.map(r=>{const value=r.uploadId?this.staged.get(r.uploadId)?.row:allowed.find(a=>a.id===r.id);if(!value||!existsSync(this.file(value.id)))throw Error('素材已失效，请重新添加');return {...value};});if(result.reduce((n,r)=>n+r.bytes,0)>200*MB)throw Error('单条素材合计最多200MB');return mediaMetadata(result);
   }
   committed(rows=[]){for(const r of rows)if(r.uploadId){const value=this.staged.get(r.uploadId)?.row;if(value)this.transient.delete(value.id);this.staged.delete(r.uploadId);}}
-  discard(token){const row=this.staged.get(token)?.row;this.staged.delete(token);if(row&&this.transient.has(row.id)&&!Array.from(this.staged.values()).some(s=>s.row.id===row.id)&&!this.store.list('assets').some(a=>a.media?.some(m=>m.id===row.id))){try{unlinkSync(this.file(row.id));this.transient.delete(row.id);}catch(e){if(e.code!=='ENOENT')throw e;}}}
+  referenced(id){
+    if(!!this.store.db.prepare("SELECT 1 FROM records r,json_each(CASE WHEN r.kind='assets' THEN json_extract(r.body,'$.media') ELSE json_extract(r.body,'$.originalMedia') END) m WHERE r.kind IN ('assets','jobs') AND json_extract(m.value,'$.id')=? LIMIT 1").get(id))return true;
+    if(!!this.store.db.prepare("SELECT 1 FROM records r,json_each(json_extract(r.body,'$.images')) m WHERE r.kind='jobs' AND json_extract(m.value,'$.id')=? LIMIT 1").get(id))return true;
+    // comfyJobs 的引用：顶层 mediaId（结果图）与 slots.*.mediaId（上传输入图），防止被当作无主文件误清。
+    // slots 里含非对象槽（如 prompt='hello'、null），json_extract 对裸字符串会抛 malformed JSON，
+    // 故先 json_valid + json_type 护栏，仅对对象槽读取 mediaId。
+    return !!this.store.db.prepare("SELECT 1 FROM records r WHERE r.kind='comfyJobs' AND (json_extract(r.body,'$.mediaId')=? OR EXISTS(SELECT 1 FROM json_each(json_extract(r.body,'$.slots')) s WHERE json_valid(s.value) AND json_type(s.value)='object' AND json_extract(s.value,'$.mediaId')=?)) LIMIT 1").get(id,id);
+  }
+  discard(token){const row=this.staged.get(token)?.row;this.staged.delete(token);if(row&&this.transient.has(row.id)&&!Array.from(this.staged.values()).some(s=>s.row.id===row.id)&&!this.referenced(row.id)){try{unlinkSync(this.file(row.id));this.transient.delete(row.id);}catch(e){if(e.code!=='ENOENT')throw e;}}}
   expire(){for(const [token,s]of this.staged)if(s.expires<Date.now())this.discard(token);}
   linked(assetId,id){const a=this.store.get('assets',assetId),row=a?.media?.find(m=>m.id===id);if(!row||!existsSync(this.file(id)))throw Error('素材不存在，可在编辑中重新添加');return {...row,file:this.file(id),bytes:statSync(this.file(id)).size};}
-  exportFiles(assets){const ids=[...new Set(assets.flatMap(a=>(a.media||[]).map(m=>m.id)))];let total=0;return ids.map(id=>{const data=readFileSync(this.file(id));total+=data.length;if(total>200*MB)throw Error('素材备份超过200MB，请分批导出，或复制整个data目录备份');return {id,base64:data.toString('base64')};});}
+  exportFiles(assets){const ids=[...new Set(assets.flatMap(a=>(a.media||[]).map(m=>m.id)))];let total=0;const files=ids.map(id=>{const file=this.file(id);if(!existsSync(file))throw Error('素材文件缺失，备份不完整');const size=statSync(file).size;total+=size;if(total>200*MB)throw Error('素材备份超过200MB，请分批导出，或复制整个data目录备份');return {id,file,size};});return files.map(({id,file})=>({id,base64:readFileSync(file).toString('base64')}));}
   importFiles(files=[]){if(!Array.isArray(files)||files.length>8000)throw Error('素材备份无效');let total=0;const prepared=files.map(f=>{if(!f||!/^[a-f0-9]{64}$/.test(f.id)||typeof f.base64!=='string'||!/^[A-Za-z0-9+/]*={0,2}$/.test(f.base64)||f.base64.length>140*MB)throw Error('素材备份内容无效');const data=Buffer.from(f.base64,'base64');total+=data.length;if(total>200*MB)throw Error('素材备份合计最多200MB');const type=mediaType(data.subarray(0,512));if(data.length>(type.startsWith('image/')?20:100)*MB)throw Error('素材超过图片20MB或视频100MB限制');if(createHash('sha256').update(data).digest('hex')!==f.id)throw Error('素材备份校验失败');return {id:f.id,data};});const created=[];try{for(const f of prepared)if(!existsSync(this.file(f.id))){const temp=this.file(f.id)+'.part';writeFileSync(temp,f.data);renameSync(temp,this.file(f.id));created.push(f.id);}return created;}catch(e){this.rollbackImport(created);throw e;}}
   validateReferences(assets){for(const a of assets)for(const m of mediaMetadata(a.media||[])){const r=this.metadata(m.id,m.name);if(r.type!==m.type||r.bytes!==m.bytes)throw Error('素材文件缺失或与备份信息不一致');}}
-  rollbackImport(ids){for(const id of ids)if(!this.store.list('assets').some(a=>a.media?.some(m=>m.id===id))){try{unlinkSync(this.file(id));}catch(e){if(e.code!=='ENOENT')throw e;}}}
+  // comfyJobs 引用的媒体 id（结果图 mediaId 与上传输入图 slots.*.mediaId），供完整备份导出纳入二进制。
+  comfyJobMediaIds(comfyJobs=[]){
+    const ids=new Set();
+    for(const j of comfyJobs){
+      if(j&&typeof j.mediaId==='string'&&j.mediaId)ids.add(j.mediaId);
+      if(j&&j.slots&&typeof j.slots==='object')for(const v of Object.values(j.slots))if(v&&typeof v==='object'&&typeof v.mediaId==='string'&&v.mediaId)ids.add(v.mediaId);
+    }
+    return [...ids];
+  }
+  // 校验 comfyJobs 引用的媒体文件是否齐全（导入后缺图检查）。返回缺图 id 列表，缺图不抛错（由调用方标记缺图状态）。
+  missingComfyMedia(comfyJobs=[]){const ids=this.comfyJobMediaIds(comfyJobs);return ids.filter(id=>!existsSync(this.file(id)));}
+  rollbackImport(ids){for(const id of ids)if(!this.referenced(id)){try{unlinkSync(this.file(id));}catch(e){if(e.code!=='ENOENT')throw e;}}}
 }

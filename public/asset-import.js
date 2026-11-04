@@ -1,6 +1,11 @@
 import {decodePromptBytes,parsePromptText,isPromptTextFile} from './prompt-import.js';
 const $=s=>document.querySelector(s),esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const supported=/\.(png|jpe?g|webp|gif|mp4|webm|mov)$/i;
+export function assetSourceMarkup(asset,{detail=false}={}){
+  const safe=url=>{try{const u=new URL(url);return u.protocol==='https:'&&!u.username&&!u.password?u.href:'';}catch{return '';}};
+  const meta=asset.collectionMedia,video=safe(meta?.videoUrl),source=safe(asset.source?.url);
+  return (video?'<p><a class="source-link asset-source-video" href="'+esc(video)+'" target="_blank" rel="noopener noreferrer">▶ 查看原作者效果视频 ↗</a><small class="muted"> · 原站链接，未下载视频</small></p>':'')+(meta?.failures?.length?'<p class="muted asset-media-warning">'+esc(meta.failures.map(r=>r.message).join('；'))+' <button class="secondary small" data-action="asset-fill-media" data-id="'+esc(asset.id)+'">重试保存来源图片</button></p>':'')+(detail&&asset.source?'<p class="muted">作者：'+esc(asset.source.author||'未标注')+' · 许可：'+esc(asset.source.license||'未标注')+'</p>'+(source?'<a class="source-link" href="'+esc(source)+'" target="_blank" rel="noopener noreferrer">查看原始来源 ↗</a>':''):'');
+}
 export class AssetImporter{
   constructor(ctx){this.c=ctx;this.rows=[];this.epoch=0;this.saving=false;this.reading=0;}
   open(value={}){this.epoch++;const oldTokens=this.rows.filter(r=>r.uploaded).map(r=>r.uploaded.uploadId);this.release();for(const token of oldTokens)this.c.api('media/staged/'+token,null,'DELETE').catch(()=>{});this.importInfo=value.importInfo||null;this.rows=(value.media||[]).map(m=>({...m,existing:true,url:'/api/assets/'+encodeURIComponent(value.id||value.copyOf)+'/media/'+m.id}));$('#asset-import-note').textContent='';$('#asset-import-note').hidden=true;$('#asset-import-original').textContent=this.importInfo?.raw||'';$('#asset-import-info').hidden=!this.importInfo;$('#asset-dialog h2').textContent=this.importInfo&&!value.id?'确认导入提示词':'保存提示词';$('#asset-form [type=submit]').textContent=this.importInfo&&!value.id?'确认导入':'保存提示词';$('#asset-media-files').value='';this.render();}

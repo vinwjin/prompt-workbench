@@ -3,10 +3,10 @@ import assert from 'node:assert/strict';
 import { mkdirSync,mkdtempSync } from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
-import { createWorkbench } from '../src/server.js';
+import { createWorkbench } from './source-fixtures.js';
 import { Lifecycle } from '../src/lifecycle.js';
 import { setTimeout as sleep } from 'node:timers/promises';
-const dir=()=>{mkdirSync('work',{recursive:true});return mkdtempSync(path.resolve('work','integration-'));};
+const dir=()=>{mkdirSync('work',{recursive:true});return mkdtempSync(path.resolve(process.env.PW_TEST_ROOT||'work','integration-'));};
 async function session(app){const url=`http://127.0.0.1:${app.port}`;const root=await fetch(url);const cookie=root.headers.get('set-cookie').split(';')[0];return async(route,body,options={})=>{const response=await fetch(url+'/api/'+route,{method:body?'POST':'GET',headers:{Cookie:cookie,...(body?{'Content-Type':'application/json'}:{}),...options.headers},body:body?JSON.stringify(body):undefined});return {status:response.status,data:await response.json()};};}
 async function until(fn,timeout=5000){const end=Date.now()+timeout;while(Date.now()<end){const r=await fn();if(r)return r;await sleep(20);}throw new Error('test timeout');}
 
@@ -19,11 +19,11 @@ test('工作台会话防跨站；密钥不回传；任务/资产/草稿跨重启
     const p=r.data;const j=(await call('jobs',{providerId:p.id,templateId:'optimize',input:'测试中文数据',variables:{language:'中文'}})).data;
     await until(async()=>{const r=await call('jobs/'+j.id);return r.data.status==='succeeded'&&r.data;});
     const saved=await call('assets',{title:'收藏',content:'版本一'});await call('assets',{...saved.data,content:'版本二'});
-    assert.equal((await call('state')).data.assets[0].versions[0].content,'版本一');
+    const detail=(await call('assets/'+saved.data.id)).data;assert.equal(detail.versions[0].content,'版本一');assert.equal(detail.content,'版本二');
     await call('draft',{input:'未完成的草稿',providerId:p.id,templateId:'optimize'});
     const exported=(await call('export')).data;assert.ok(!JSON.stringify(exported).includes('fake-test-key'));
     await app.close();app=await createWorkbench({port:0,dataDir,generator});call=await session(app);
-    const state=(await call('state')).data;assert.equal(state.assets[0].content,'版本二');assert.equal(state.draft.input,'未完成的草稿');assert.equal(state.jobs[0].output,'优化后的中文提示词');assert.equal(state.providers.find(x=>x.id===p.id).hasKey,true);
+    const state=(await call('state')).data;assert.deepEqual(state.assets,[]);assert.equal((await call('assets/'+saved.data.id)).data.content,'版本二');assert.equal((await call('assets')).data.items[0].excerpt,'版本二');assert.equal(state.draft.input,'未完成的草稿');assert.equal(state.jobs[0].output,undefined);assert.equal((await call('jobs/'+state.jobs[0].id)).data.output,'优化后的中文提示词');assert.equal(state.providers.find(x=>x.id===p.id).hasKey,true);
   }finally{await app.close();}
 });
 test('取消运行与排队任务；不会自动重试；运行期间配置不可覆写',async()=>{

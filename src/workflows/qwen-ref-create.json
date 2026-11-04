@@ -1,0 +1,69 @@
+{
+  "prompt": {
+    "class_type": "LocalQwenPrompt",
+    "inputs": {
+      "task": "人物或场景参考创作",
+      "prompt": "",
+      "negative_prompt": "",
+      "references_state": "[]",
+      "optimizer": "关闭",
+      "llama_model": "qwen3-vl-8b-ablit-q4km",
+      "read_media": false,
+      "optimizer_options": "{\"mode\":\"api\",\"language\":\"zh\",\"output_language\":\"中文\",\"guide\":\"none\",\"optimize_on_run\":false}"
+    }
+  },
+  "encode": {
+    "class_type": "LocalQwenEncode",
+    "inputs": {
+      "prompt": ["prompt", 0],
+      "negative_prompt": ["prompt", 1],
+      "references": ["prompt", 2],
+      "unet_name": "NoctQ_V4_int8_convrot.safetensors",
+      "clip_name": "qwen3vl_8b_int8_convrot.safetensors",
+      "vae_name": "qwen_image_2.1_vae_bf16.safetensors",
+      "width": 288,
+      "height": 384,
+      "reference_size": 256,
+      "loader_options": "{}",
+      "lora_stack": "[{\"name\":\"qwen21-nsfw-image-edit.safetensors\",\"strength\":1,\"enabled\":true}]",
+      "reference_fit": "center"
+    }
+  },
+  "cache": {
+    "class_type": "QwenImage21Cache",
+    "inputs": {
+      "model": ["encode", 0],
+      "device": "auto",
+      "dtype": "default"
+    }
+  },
+  "sampler": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": ["cache", 0],
+      "positive": ["encode", 1],
+      "negative": ["encode", 2],
+      "latent_image": ["encode", 3],
+      "seed": 0,
+      "steps": 25,
+      "cfg": 1.5,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1.0
+    }
+  },
+  "decode": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": ["sampler", 0],
+      "vae": ["encode", 4]
+    }
+  },
+  "save": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": ["decode", 0],
+      "filename_prefix": "pw/comfy"
+    }
+  }
+}

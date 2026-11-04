@@ -2,13 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdtempSync,mkdirSync} from 'node:fs';
 import path from 'node:path';
-import {createWorkbench} from '../src/server.js';
+import {createWorkbench} from './source-fixtures.js';
 import {saveAsset,bulkManage} from '../src/library.js';
 import {saveTemplate} from '../src/template-studio.js';
 
 async function fixture(){
   mkdirSync('work',{recursive:true});
-  const app=await createWorkbench({port:0,dataDir:mkdtempSync(path.resolve('work','refinement-')),generator:async()=>({output:'模拟正文'})});
+  const app=await createWorkbench({port:0,dataDir:mkdtempSync(path.resolve(process.env.PW_TEST_ROOT||'work','refinement-')),generator:async()=>({output:'模拟正文'})});
   const root='http://127.0.0.1:'+app.port,cookie=(await fetch(root)).headers.get('set-cookie').split(';')[0];
   const call=async(route,b,method)=>{const r=await fetch(root+'/api/'+route,{method:method||(b?'POST':'GET'),headers:{cookie,...(b?{'Content-Type':'application/json'}:{})},body:b?JSON.stringify(b):undefined});return {status:r.status,data:await r.json()};};
   return {app,call};
