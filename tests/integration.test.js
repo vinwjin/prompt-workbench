@@ -19,11 +19,11 @@ test('工作台会话防跨站；密钥不回传；任务/资产/草稿跨重启
     const p=r.data;const j=(await call('jobs',{providerId:p.id,templateId:'optimize',input:'测试中文数据',variables:{language:'中文'}})).data;
     await until(async()=>{const r=await call('jobs/'+j.id);return r.data.status==='succeeded'&&r.data;});
     const saved=await call('assets',{title:'收藏',content:'版本一'});await call('assets',{...saved.data,content:'版本二'});
-    assert.equal((await call('state')).data.assets[0].versions[0].content,'版本一');
+    const detail=(await call('assets/'+saved.data.id)).data;assert.equal(detail.versions[0].content,'版本一');assert.equal(detail.content,'版本二');
     await call('draft',{input:'未完成的草稿',providerId:p.id,templateId:'optimize'});
     const exported=(await call('export')).data;assert.ok(!JSON.stringify(exported).includes('fake-test-key'));
     await app.close();app=await createWorkbench({port:0,dataDir,generator});call=await session(app);
-    const state=(await call('state')).data;assert.equal(state.assets[0].content,'版本二');assert.equal(state.draft.input,'未完成的草稿');assert.equal(state.jobs[0].output,'优化后的中文提示词');assert.equal(state.providers.find(x=>x.id===p.id).hasKey,true);
+    const state=(await call('state')).data;assert.deepEqual(state.assets,[]);assert.equal((await call('assets/'+saved.data.id)).data.content,'版本二');assert.equal((await call('assets')).data.items[0].excerpt,'版本二');assert.equal(state.draft.input,'未完成的草稿');assert.equal(state.jobs[0].output,undefined);assert.equal((await call('jobs/'+state.jobs[0].id)).data.output,'优化后的中文提示词');assert.equal(state.providers.find(x=>x.id===p.id).hasKey,true);
   }finally{await app.close();}
 });
 test('取消运行与排队任务；不会自动重试；运行期间配置不可覆写',async()=>{

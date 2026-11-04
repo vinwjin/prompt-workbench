@@ -1,4 +1,4 @@
-import {resultAsset} from './library.js';
+import {assetMeta} from './asset-query.js';
 
 // Cache only database-derived rows. Runtime queues and source progress stay live.
 export class StateSnapshot {
@@ -7,11 +7,12 @@ export class StateSnapshot {
   get(){const s=this.store;return {
     providers:this.read('providers',['providers'],()=>s.list('providers').map(p=>s.publicProvider(p))),
     templates:this.read('templates',['templates'],()=>s.list('templates').filter(t=>!t.deletedAt)),
-    assets:this.read('assets',['assets','jobs'],()=>s.list('assets').map(a=>({...a,isResult:resultAsset(s,a)}))),
+    assets:[],assetRevision:s.kindRevision('assets'),assetMeta:this.read('assetMeta',['assets','folders'],()=>assetMeta(s)),
     folders:this.read('folders',['folders'],()=>s.list('folders')),
     modelLists:this.read('models',['modelLists'],()=>s.list('modelLists')),
     recovery:this.read('recovery',['jobs'],()=>s.recoverySummary()),
-    jobs:this.read('jobs',['jobs'],()=>s.jobPage({limit:250}).jobs),
-    draft:this.read('draft',['drafts'],()=>s.get('drafts','workbench'))
+    jobs:this.read('jobs',['jobs'],()=>s.jobSummaryPage({limit:250}).jobs),
+    draft:this.read('draft',['drafts'],()=>s.get('drafts','workbench')),
+    backupStatus:s.backupStatus()
   };}
 }

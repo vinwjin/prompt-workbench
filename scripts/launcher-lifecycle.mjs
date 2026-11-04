@@ -11,10 +11,11 @@ import {removeOwnedArtifact} from './test-artifacts.mjs';
 const out=path.resolve(process.env.PW_LIFECYCLE_EVIDENCE_DIR||'work/launcher-lifecycle');mkdirSync(out,{recursive:true});const data=mkdtempSync(path.join(out,'data-')),profile=mkdtempSync(path.join(out,'chrome-'));
 // Run the actual committed backend against the new static UI; only its workspace root is relocated.
 const legacy=mkdtempSync(path.join(out,'legacy-'));
-const refs=execFileSync('git',['log','-20','--format=%H'],{encoding:'utf8',windowsHide:true}).trim().split(/\r?\n/);
-const legacyRef=refs.find(ref=>{const source=execFileSync('git',['show',ref+':public/version.js'],{encoding:'utf8',windowsHide:true});return source.match(/VERSION\s*=\s*['"]([^'"]+)/)?.[1]!==VERSION;});assert.ok(legacyRef,'need a committed older version');
-const tracked=execFileSync('git',['ls-tree','-r','--name-only',legacyRef,'--','src','public/version.js'],{encoding:'utf8',windowsHide:true}).trim().split(/\r?\n/);
-for(const file of tracked){const target=path.join(legacy,file);mkdirSync(path.dirname(target),{recursive:true});let bytes=execFileSync('git',['show',legacyRef+':'+file],{windowsHide:true});if(file==='src/server.js'){const text=bytes.toString('utf8'),rootLine="const ROOT=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');";assert.ok(text.includes(rootLine));bytes=Buffer.from(text.replace(rootLine,'const ROOT='+JSON.stringify(process.cwd())+';'));}writeFileSync(target,bytes);}
+const gitRoot=execFileSync('git',['rev-parse','--show-toplevel'],{encoding:'utf8',windowsHide:true}).trim();
+const refs=execFileSync('git',['-C',gitRoot,'log','-20','--format=%H'],{encoding:'utf8',windowsHide:true}).trim().split(/\r?\n/);
+const legacyRef=refs.find(ref=>{const source=execFileSync('git',['-C',gitRoot,'show',ref+':public/version.js'],{encoding:'utf8',windowsHide:true});return source.match(/VERSION\s*=\s*['"]([^'"]+)/)?.[1]!==VERSION;});assert.ok(legacyRef,'need a committed older version');
+const tracked=execFileSync('git',['-C',gitRoot,'ls-tree','-r','--name-only',legacyRef,'--','src','public/version.js','public/image-options.js'],{encoding:'utf8',windowsHide:true}).trim().split(/\r?\n/);
+for(const file of tracked){const target=path.join(legacy,file);mkdirSync(path.dirname(target),{recursive:true});let bytes=execFileSync('git',['-C',gitRoot,'show',legacyRef+':'+file],{windowsHide:true});if(file==='src/server.js'){const text=bytes.toString('utf8'),rootLine="const ROOT=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');";assert.ok(text.includes(rootLine));bytes=Buffer.from(text.replace(rootLine,'const ROOT='+JSON.stringify(process.cwd())+';'));}writeFileSync(target,bytes);}
 const oldVersion=(await import(pathToFileURL(path.join(legacy,'public/version.js')))).VERSION;
 assert.notEqual(oldVersion,VERSION,'lifecycle requires a genuinely older committed backend');
 const {createWorkbench:createLegacy}=await import(pathToFileURL(path.join(legacy,'src/server.js')));

@@ -6,8 +6,8 @@ import net from 'node:net';
 import assert from 'node:assert/strict';
 process.env.PW_ANTIGRAVITY_OAUTH_CLIENT_ID='synthetic-client.apps.googleusercontent.com';
 process.env.PW_ANTIGRAVITY_OAUTH_CLIENT_SECRET='synthetic-oauth-registration';
-const {createWorkbench}=await import('../tests/source-fixtures.js');
-const {accountBase}=await import('../src/accounts.js');
+const {createWorkbench}=await import("../tests/source-fixtures.js");
+import {accountBase} from '../src/accounts.js';
 import {removeOwnedArtifact} from './test-artifacts.mjs';
 const out=path.resolve('work/model-catalog-dev20/ui');mkdirSync(out,{recursive:true});const data=mkdtempSync(path.join(out,'data-')),profile=mkdtempSync(path.join(out,'chrome-')),calls=[],generations=[];let offline=false,release,hold=false;
 const platformFor=url=>url.includes('cloudcode-pa')?'antigravity':url.includes('workbuddy')?'workbuddy':url.includes('api.openai')?'chatgpt':'grok';
@@ -20,7 +20,7 @@ try{
   const cdp=(method,params={})=>new Promise((resolve,reject)=>{const id=++seq;pending.set(id,{resolve,reject});ws.send(JSON.stringify({id,method,params}));setTimeout(()=>{if(pending.has(id)){pending.delete(id);reject(Error('CDP超时 '+method));}},15000).unref();});const ev=async expression=>{const r=await cdp('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true});if(r.exceptionDetails)throw Error(r.exceptionDetails.exception?.description||r.exceptionDetails.text);return r.result.value;},wait=async expression=>{for(let i=0;i<150;i++){if(await ev(expression))return;await sleep(100);}throw Error('界面等待失败 '+expression);};
   const shot=async name=>writeFileSync(path.join(out,name),Buffer.from((await cdp('Page.captureScreenshot',{format:'png',captureBeyondViewport:false})).data,'base64'));
   const open=async p=>{await ev(`document.querySelector('[data-view=models]').click();document.querySelector('[data-connection-action=models][data-id="${p.id}"]').click()`);await wait(`document.querySelector('#connection-model-title').textContent==='${p.name}'&&document.querySelector('#connection-read-state').textContent.startsWith('已读取')`);};
-  await cdp('Runtime.enable');await cdp('Page.enable');await cdp('Emulation.setDeviceMetricsOverride',{width:1440,height:1050,deviceScaleFactor:1,mobile:false});await cdp('Page.navigate',{url:'http://127.0.0.1:'+app.port});await wait('!!document.querySelector("#add-account")');
+  await cdp('Runtime.enable');await cdp('Page.enable');await cdp('Emulation.setDeviceMetricsOverride',{width:1440,height:1050,deviceScaleFactor:1,mobile:false});await cdp('Page.navigate',{url:'http://127.0.0.1:'+app.port});await wait('document.querySelector("#provider-select").value!=="" && document.querySelector("#provider-select").options.length>0');
   const freshId=await ev(`document.querySelector('#provider-select').value`),fresh=providers.find(p=>p.id===freshId);
   await open(fresh);await ev(`document.querySelector('#connection-use-model').value='${fresh.name}-b';document.querySelector('#connection-use-model').dispatchEvent(new Event('change'));document.querySelector('#connection-set-default').click()`);await wait(`document.querySelector('#connection-set-default').disabled`);assert.equal(await ev(`document.querySelector('#model-name').value`),fresh.name+'-a','首次显示默认模型也须固定本次选择');await ev(`document.querySelector('#connection-use-model').value='${fresh.name}-a';document.querySelector('#connection-use-model').dispatchEvent(new Event('change'));document.querySelector('#connection-set-default').click()`);await wait(`document.querySelector('#connection-set-default').disabled`);await ev(`document.querySelector('#connection-model-dialog [data-close]').click()`);
   for(const p of providers){

@@ -22,10 +22,10 @@ export class Accounts{
   publicAttempt(a){return {id:a.id,platform:a.platform,status:a.status,phase:a.phase||'waiting-authorization',authorizationUrl:a.authorizationUrl,userCode:a.userCode,expiresAt:a.expiresAt,interval:a.interval,providerId:a.savedId,message:a.message,retryable:a.retryable===true,retryCount:a.retryCount||0,errorCode:a.errorCode,nextPollAt:a.nextPoll};}
   pollFailed(a,error){if(a.status!=='pending'){a.tokenResponse=null;return;}const count=(a.retryCount||0)+1;a.retryCount=count;a.errorCode=error instanceof AccountRequestError?error.code:'ACCOUNT_LOGIN_FAILED';if(error instanceof AccountRequestError&&error.retryable&&count<=3){a.retryable=true;const seconds=Math.max(a.interval,Math.min(60,2**count*2),error.retryAfter);a.nextPoll=this.now()+seconds*1000;a.message=error.message+'；'+seconds+'秒后继续检查（'+count+'/3）。';}else{a.status='failed';a.retryable=false;a.message=error instanceof AccountRequestError?'账号服务连续检查失败，请重新登录':error.message;clearTimeout(a.expiryTimer);a.listener?.close();a.tokenResponse=null;}}
   async start(input={}){
+    if(input.platform==='antigravity'&&(!ANTIGRAVITY_CLIENT||!ANTIGRAVITY_CLIENT_SECRET))throw Error('Antigravity 需要维护者配置自己的 OAuth 客户端注册后使用，详见公开版说明');
     if(!PLATFORMS.has(input.platform))throw Error('账号平台无效');if(this.busy())throw Error('请等待当前任务结束后登录账号');
     for(const [id,a]of this.attempts)if(a.expiresAt<=this.now()||a.status!=='pending'){a.ctrl.abort();a.listener?.close();clearTimeout(a.expiryTimer);this.attempts.delete(id);}
     if(this.attempts.size>=8)throw Error('待授权登录过多，请先取消其他登录');
-    if(input.platform==='antigravity'&&(!ANTIGRAVITY_CLIENT||!ANTIGRAVITY_CLIENT_SECRET))throw Error('Antigravity 需要维护者配置自己的 OAuth 客户端注册后使用，详见公开版说明');
     const old=input.providerId?this.store.get('providers',String(input.providerId)):null;
     if(input.providerId&&(!old||old.accountPlatform!==input.platform))throw Error('账号连接不存在或平台不匹配');
     const a={id:randomUUID(),platform:input.platform,region:old?.accountRegion||(input.region==='intl'?'intl':'cn'),name:String(input.name||old?.name||input.platform).trim().slice(0,100),providerId:old?.id,previous:old?.accountEpoch,status:'pending',expiresAt:this.now()+900000,interval:5,ctrl:new AbortController(),state:randomBytes(32).toString('base64url')};

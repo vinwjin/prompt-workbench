@@ -1,5 +1,17 @@
 ﻿param([switch]$NoBrowser)
 $ErrorActionPreference='Stop'
+trap {
+  $launchError=$_.Exception.Message
+  Write-Error -Message $launchError -ErrorAction Continue
+  # 桌面入口隐藏 PowerShell 窗口，必须另行显示失败原因。
+  if(-not $NoBrowser){
+    try {
+      $launchShell=New-Object -ComObject WScript.Shell
+      $null=$launchShell.Popup($launchError,0,'提示词工坊 · 启动未完成',48)
+    } catch { Write-Error -Message '无法显示启动错误提示。' -ErrorAction Continue }
+  }
+  exit 1
+}
 $projectDir=Split-Path -Parent $PSScriptRoot
 $port=18765
 if($env:PW_PORT){$port=[int]$env:PW_PORT}
@@ -24,7 +36,11 @@ $sha.Dispose()
 $r=$null
 try {$r=Invoke-RestMethod -Uri "$url/health" -TimeoutSec 2} catch {}
 if($r -and ($r.app -ne 'prompt-workbench' -or $r.instance -ne $instance)){throw '端口被其他实例占用，请设置不同的PW_PORT；未停止已有服务'}
-if($r -and $r.version -ne $expectedVersion){throw "旧服务尚未退出（$($r.version)，程序$expectedVersion）。请在页面点击关闭服务，等到退出确认后重新打开；未复用旧版，也未强制中断服务。"}
+if($r -and $r.version -ne $expectedVersion){
+  # 已核实为同目录实例：打开现有页面供保存和关闭，仍拒绝把旧版当作启动成功。
+  if(-not $NoBrowser){Start-Process $url}
+  throw "旧服务尚未退出（$($r.version)，程序$expectedVersion）。请在已打开的页面保存输入，点击「服务 → 关闭服务」，等到退出确认后重新打开桌面图标；未复用旧版，也未强制中断服务。"
+}
 if(-not $r){
   $nodePath=(Get-Command node.exe -ErrorAction Stop).Source
   if([int]((& $nodePath --version).TrimStart('v').Split('.')[0]) -lt 24){throw '需要Node.js24或更高版本'}

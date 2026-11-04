@@ -8,6 +8,7 @@ import {InboxQueue} from './inbox-queue.js';
 import {XTimeline} from './x-timeline.js';
 import {ImageBatch} from './image-batch.js';
 import http from 'node:http';
+import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readFileSync, existsSync, createReadStream } from 'node:fs';
@@ -21,38 +22,56 @@ import { validateProvider, models } from './providers.js';
 import { Lifecycle } from './lifecycle.js';
 import {VERSION} from '../public/version.js';
 import { Jobs } from './jobs.js';
-import { bulkManage, saveAsset, provenance, resultAsset, exportAssets } from './library.js';
+import { bulkManage, saveAsset, provenance, exportAssets } from './library.js';
 import { Sources } from './sources.js';
+import { PoseGallery } from './pose-gallery.js';
+import { RefLibrary } from './ref-library.js';
+import { ImageJobs } from './image-jobs.js';
 import { ImageCache } from './image-cache.js';
 import {XInbox} from './x-inbox.js';
 import {saveTemplate,previewTemplate} from './template-studio.js';
 import {saveSnippet,composeInput,compareJobs,iterationChain,qualityRules} from './prompt-lab.js';
 import {checkQuality} from './quality.js';
+import {hydrateImages} from './job-images.js';
+import {assetPage,assetCollectionStatus} from './asset-query.js';
+import {readLlamaDefaults} from './llama-router.js';
 
 const ROOT=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
-export async function createWorkbench({dataDir=path.join(ROOT,'data'),port=18765,store=new Store(dataDir),vault=new SecretVault(),lifecycle=new Lifecycle(dataDir),generator,sourceFetcher,imageFetcher,xFetcher,accountFetcher,accountNow}={}){
+
+// 重启命令：等待旧服务释放端口后，用启动器幂等拉起新实例。抽成纯函数便于测试命令构造。
+export function restartCommand(root){
+  const startScript=path.join(root,'scripts','start.ps1');
+  const script=`$port=18765; if($env:PW_PORT){$port=[int]$env:PW_PORT}; for($i=0;$i -lt 60;$i++){ Start-Sleep -Milliseconds 500; $c=Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue; if(-not $c){ break } }; & '${startScript.replace(/'/g,"''")}' -NoBrowser`;
+  return {file:'powershell.exe',args:['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-Command',script]};
+}
+export async function createWorkbench({dataDir=path.join(ROOT,'data'),port=18765,store=new Store(dataDir),vault=new SecretVault(),lifecycle=new Lifecycle(dataDir),generator,sourceFetcher,imageFetcher,xFetcher,accountFetcher,accountNow,comfyFetcher}={}){
   const token=randomBytes(32).toString('hex');const jobs=new Jobs(store,vault,lifecycle,{generator});
   const stateSnapshot=new StateSnapshot(store),dataOperations=new DataOperations(store);
   const accounts=new Accounts(store,vault,{fetcher:accountFetcher,now:accountNow,busy:()=>!!jobs.active||!!jobs.queue.length||lifecycle.locked});
   jobs.resolveProvider=(p,signal)=>accounts.resolve(p,signal);
   const assetMedia=new AssetMedia(store);
-  const connections=new ConnectionManagement(store,jobs);
+  const connections=new ConnectionManagement(store,jobs,lifecycle);
   const imageBatch=new ImageBatch(store,jobs,assetMedia);jobs.onSuccess=job=>imageBatch.collect(job);
   const imageCache=new ImageCache(store,{fetcher:imageFetcher});
   const sources=new Sources(store,{fetcher:sourceFetcher,imageVerifier:url=>imageCache.get(url)});const discovery=new GalleryDiscovery(store,jobs);
+  const poses=new PoseGallery(store,{fetcher:sourceFetcher,imageCache});
+  const refs=new RefLibrary(store,{fetcher:sourceFetcher,imageCache});
+  const imageJobs=new ImageJobs(store,assetMedia,{refs,poses,vault,fetchFn:comfyFetcher||fetch});
   const sharedCollection=new SharedCollection(store,sources,imageCache,assetMedia);
   const inbox=new XInbox(store,{fetcher:xFetcher});const inboxQueue=new InboxQueue(store,inbox);const timeline=new XTimeline(store,inboxQueue,{fetcher:xFetcher});
   const leaseKeys=p=>[...lifecycle.owned].filter(key=>key.startsWith(lifecycle.key({...p,model:''})));
   const leasedProvider=p=>{const prefix=lifecycle.key({...p,model:''}),key=leaseKeys(p)[0];return key?{...p,model:key.slice(prefix.length)}:p;};
   const sameConnection=(a,b)=>!!a&&connectionFingerprint(a)===connectionFingerprint(b);
-  const iniPath=process.env.PW_ROUTER_INI||'';
-  for(const p of store.list('providers'))if(p.protocol==='router'&&p.baseUrl==='http://127.0.0.1:18180/v1'&&!store.get('modelLists',p.id)&&existsSync(iniPath)){
-    const ids=[...readFileSync(iniPath,'utf8').matchAll(/^\[([^\]\r\n]+)\]\s*$/gm)].map(m=>m[1]).filter(id=>id!=='*');
+  const llamaDefaults=()=>readLlamaDefaults(dataDir);
+  const presets=()=>PRESETS.map(p=>p.id==='router'?{...p,managedRouter:true,...llamaDefaults(),model:''}:p);
+  const legacyRouterIni=process.env.PW_ROUTER_INI||'';
+  for(const p of store.list('providers'))if(p.protocol==='router'&&p.managedRouter!==true&&p.baseUrl==='http://127.0.0.1:18180/v1'&&!store.get('modelLists',p.id)&&existsSync(legacyRouterIni)){
+    const ids=[...readFileSync(legacyRouterIni,'utf8').matchAll(/^\[([^\]\r\n]+)\]\s*$/gm)].map(m=>m[1]).filter(id=>id!=='*');
     store.put('modelLists',{id:p.id,models:ids.map(id=>({id,status:'configured'})),source:'local-configuration',checkedAt:new Date().toISOString()});
   }
   let stopping=false;const modelReadVersions=new Map();
   const json=(res,code,data)=>{res.writeHead(code,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});res.end(JSON.stringify(data));};
-  const body=async req=>{req.setEncoding('utf8');let raw='',size=0;for await(const chunk of req){size+=Buffer.byteLength(chunk);if(size>((req.url==='/api/import'||req.url==='/api/assets/import')?320e6:14e6))throw new Error('请求过大，请缩小文件或分批导入');raw+=chunk;}if(!raw)return {};try{return JSON.parse(raw);}catch{throw new Error('JSON 格式无效');}};
+  const body=async req=>{req.setEncoding('utf8');let raw='',size=0;for await(const chunk of req){size+=Buffer.byteLength(chunk);if(size>((req.url==='/api/import'||req.url==='/api/assets/import')?320e6:req.url.split('?')[0]==='/api/comfy/jobs'?35*1024*1024:14e6))throw new Error('请求过大，请缩小文件或分批导入');raw+=chunk;}if(!raw)return {};try{return JSON.parse(raw);}catch{throw new Error('JSON 格式无效');}};
   const privateProvider=async id=>{const p=store.get('providers',id);if(!p)throw new Error('连接不存在');return accounts.resolve(p);};
   const server=http.createServer(async(req,res)=>{
     res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Referrer-Policy','no-referrer');res.setHeader('Cross-Origin-Resource-Policy','same-origin');
@@ -63,7 +82,7 @@ export async function createWorkbench({dataDir=path.join(ROOT,'data'),port=18765
     if(req.headers.origin&&!hosts.some(h=>req.headers.origin===`http://${h}`))return json(res,403,{error:'拒绝跨站访问'});
     if(route==='/health'&&req.method==='GET')return json(res,200,{app:'prompt-workbench',version:VERSION,instance:createHash('sha256').update((ROOT+'|'+store.dir).toLowerCase()).digest('hex').slice(0,16)});
     if(!route.startsWith('/api/')){
-      const files={'/':'index.html','/app.js':'app.js','/connections.js':'connections.js','/account-login.js':'account-login.js','/version.js':'version.js','/recovery-gate.js':'recovery-gate.js','/service-exit.js':'service-exit.js','/studio.js':'studio.js','/management.css':'management.css','/settings.js':'settings.js','/collections.js':'collections.js','/source-manager.js':'source-manager.js','/recycle.js':'recycle.js','/dialogs.js':'dialogs.js','/folders.js':'folders.js','/lab.js':'lab.js','/asset-import.js':'asset-import.js','/prompt-import.js':'prompt-import.js','/image-batch.js':'image-batch.js','/style.css':'style.css','/manifest.json':'manifest.json','/icon.svg':'icon.svg'};
+      const files={'/':'index.html','/app.js':'app.js','/connections.js':'connections.js','/account-login.js':'account-login.js','/version.js':'version.js','/recovery-gate.js':'recovery-gate.js','/service-exit.js':'service-exit.js','/studio.js':'studio.js','/management.css':'management.css','/settings.js':'settings.js','/collections.js':'collections.js','/source-manager.js':'source-manager.js','/recycle.js':'recycle.js','/dialogs.js':'dialogs.js','/folders.js':'folders.js','/lab.js':'lab.js','/asset-import.js':'asset-import.js','/prompt-import.js':'prompt-import.js','/image-batch.js':'image-batch.js','/pose.js':'pose.js','/ref.js':'ref.js','/comfy-studio.js':'comfy-studio.js','/image-options.js':'image-options.js','/style.css':'style.css','/manifest.json':'manifest.json','/icon.svg':'icon.svg'};
       if(req.method!=='GET'||!files[route])return json(res,404,{error:'页面不存在'});
       if(route==='/')res.setHeader('Set-Cookie',`pw_session=${token}; HttpOnly; SameSite=Strict; Path=/`);
       const name=files[route],types={html:'text/html',js:'text/javascript',css:'text/css',json:'application/json',svg:'image/svg+xml'};
@@ -119,9 +138,10 @@ export async function createWorkbench({dataDir=path.join(ROOT,'data'),port=18765
       if(route==='/api/templates/preview'&&req.method==='POST')return json(res,200,previewTemplate(b.template,b.variables||{}));
       const restoreTemplate=route.match(/^\/api\/templates\/([^/]+)\/restore$/);
       if(restoreTemplate&&req.method==='POST'){const t=store.get('templates',restoreTemplate[1]),v=!t?.deletedAt&&t?.revisions?.find(v=>v.revision===Number(b.revision));if(!v)throw Error('模板版本不存在');return json(res,200,saveTemplate(store,{...v,variableSchema:v.variableSchema||[],id:t.id,status:'draft'}));}
-      if(route==='/api/state'&&req.method==='GET')return json(res,200,{...stateSnapshot.get(),revision:store.revision,feeds:sources.catalog(),galleryFeeds:sources.galleryCatalog(),galleryCandidates:sources.galleryCandidates(),sourceBatch:sources.batchStatus(),presets:PRESETS,activeJobId:jobs.active?.id,dataDir:store.dir});
+      if(route==='/api/state'&&req.method==='GET')return json(res,200,{...stateSnapshot.get(),revision:store.revision,feeds:sources.catalog(),galleryFeeds:sources.galleryCatalog(),galleryCandidates:sources.galleryCandidates(),sourceBatch:sources.batchStatus(),presets:presets(),activeJobId:jobs.active?.id,dataDir:store.dir});
+      if(route==='/api/llama/defaults'&&req.method==='GET')return json(res,200,llamaDefaults());
       const historyFilters=()=>({query:String(url.searchParams.get('q')||'').slice(0,300),status:String(url.searchParams.get('status')||''),providerId:String(url.searchParams.get('provider')||''),trash:url.searchParams.get('trash')==='true'});
-      if(route==='/api/history'&&req.method==='GET')return json(res,200,store.jobPage({...historyFilters(),offset:Math.max(0,Math.floor(Number(url.searchParams.get('offset'))||0)),limit:100}));
+      if(route==='/api/history'&&req.method==='GET')return json(res,200,store.jobHistoryPage({...historyFilters(),offset:Math.max(0,Math.floor(Number(url.searchParams.get('offset'))||0)),limit:100}));
       if(route==='/api/history/manage'&&req.method==='POST'){
         const page=b.all?store.jobPage({...b.filters,limit:10000}):null;
         if(page?.total>10000)throw new Error('筛选结果超过 10000 条，请缩小筛选范围后分批清理；本次没有清理任何记录');
@@ -129,6 +149,10 @@ export async function createWorkbench({dataDir=path.join(ROOT,'data'),port=18765
         return json(res,200,bulkManage(store,'jobs',{...b,ids}));
       }
       if(route==='/api/assets/manage'&&req.method==='POST')return json(res,200,bulkManage(store,'assets',b));
+      if(route==='/api/assets'&&req.method==='GET')return json(res,200,assetPage(store,{...Object.fromEntries(url.searchParams),query:url.searchParams.get('q')||''}));
+      if(route==='/api/assets/collection-status'&&req.method==='GET')return json(res,200,assetCollectionStatus(store,(url.searchParams.get('ids')||'').split(',').filter(Boolean)));
+      const assetDetail=route.match(/^\/api\/assets\/([^/]+)$/);
+      if(assetDetail&&req.method==='GET'){const a=store.get('assets',assetDetail[1]);if(!a)throw Error('提示词不存在');return json(res,200,a);}
       const fillSharedMedia=route.match(/^\/api\/assets\/([^/]+)\/fill-shared-media$/);
       if(fillSharedMedia&&req.method==='POST')return json(res,200,await sharedCollection.fill(fillSharedMedia[1]));
       if(route==='/api/assets/export'&&req.method==='POST'){const result=exportAssets(store,b.ids);return json(res,200,{...result,mediaFiles:assetMedia.exportFiles(result.assets)});}
@@ -162,6 +186,42 @@ export async function createWorkbench({dataDir=path.join(ROOT,'data'),port=18765
       if(route==='/api/sources/batch'&&req.method==='POST')return json(res,202,sources.startBatch(b.ids,{mode:b.mode}));
       if(route==='/api/sources/batch/cancel'&&req.method==='POST')return json(res,200,sources.cancelBatch(b.id));
       if(route==='/api/sources/batch'&&req.method==='GET')return json(res,200,{...sources.batchStatus(),feeds:sources.catalog(),galleryFeeds:sources.galleryCatalog(),galleryCandidates:sources.galleryCandidates()});
+      if(route==='/api/pose'&&req.method==='GET')return json(res,200,{...poses.list({series:String(url.searchParams.get('series')||''),category:String(url.searchParams.get('category')||''),angle:String(url.searchParams.get('angle')||''),query:String(url.searchParams.get('q')||'').slice(0,120),group:String(url.searchParams.get('group')||'pose'),offset:url.searchParams.get('offset'),limit:url.searchParams.get('limit')}),status:poses.status()});
+      if(route==='/api/pose/sync'&&req.method==='POST')return json(res,200,await poses.sync());
+      const poseRoute=route.match(/^\/api\/pose\/([^/]+)\/(detail|image)$/);
+      if(poseRoute){const [,poseId,poseAction]=poseRoute;
+        if(poseAction==='detail'&&req.method==='GET')return json(res,200,poses.detail(poseId));
+        if(poseAction==='image'&&req.method==='GET'){const image=await poses.image(poseId,{full:url.searchParams.get('full')==='1'});res.writeHead(200,{'Content-Type':image.type,'Content-Length':image.data.length,'Cache-Control':'no-store','X-Image-Cache':image.cached?'HIT':'MISS'});return res.end(image.data);}
+      }
+      if(route==='/api/ref'&&req.method==='GET')return json(res,200,{...refs.list({id:String(url.searchParams.get('lib')||''),group:String(url.searchParams.get('group')||''),query:String(url.searchParams.get('q')||'').slice(0,120),offset:url.searchParams.get('offset'),limit:url.searchParams.get('limit')}),status:refs.status(String(url.searchParams.get('lib')||''))});
+      if(route==='/api/ref/sync'&&req.method==='POST')return json(res,200,await refs.sync(String(b.lib||'')));
+      const refRoute=route.match(/^\/api\/ref\/([^/]+)\/(detail|image)$/);
+      if(refRoute){const [,refId,refAction]=refRoute;
+        if(refAction==='detail'&&req.method==='GET')return json(res,200,refs.detail(refId));
+        if(refAction==='image'&&req.method==='GET'){const image=await refs.image(refId,{full:url.searchParams.get('full')==='1'});res.writeHead(200,{'Content-Type':image.type,'Content-Length':image.data.length,'Cache-Control':'no-store','X-Image-Cache':image.cached?'HIT':'MISS'});return res.end(image.data);}
+      }
+      if(route==='/api/comfy/output'&&req.method==='GET')return json(res,200,imageJobs.output.settings());
+      if(route==='/api/comfy/output'&&req.method==='POST')return json(res,200,imageJobs.output.save(b.directory));
+      if(route==='/api/comfy/reveal'&&req.method==='POST')return json(res,200,await imageJobs.output.reveal(imageJobs.get(b.id)));
+      if(route==='/api/comfy/export'&&req.method==='POST')return json(res,200,imageJobs.exportResult(b.id));
+      if(route==='/api/comfy/settings'&&req.method==='GET')return json(res,200,{settings:imageJobs.settings()});
+      if(route==='/api/comfy/settings'&&req.method==='POST')return json(res,200,{settings:imageJobs.saveSettings(b)});
+      if(route==='/api/comfy/health'&&req.method==='POST')return json(res,200,await imageJobs.health(b));
+      if(route==='/api/comfy/providers/models'&&req.method==='POST')return json(res,200,await imageJobs.providerModels(b.providerId));
+      if(route==='/api/comfy/providers'&&req.method==='GET')return json(res,200,{providers:imageJobs.providers()});
+      if(route==='/api/comfy/models'&&req.method==='POST')return json(res,200,await imageJobs.models(b.recipeId));
+      if(route==='/api/comfy/workflows/scan'&&req.method==='POST')return json(res,200,imageJobs.scan(b.directory));
+      if(route==='/api/comfy/workflows/import'&&req.method==='POST')return json(res,200,imageJobs.import(b));
+      if(route==='/api/comfy/recipes'&&req.method==='GET')return json(res,200,{recipes:imageJobs.recipes()});
+      if(route==='/api/comfy/jobs/clear-history'&&req.method==='POST')return json(res,200,imageJobs.clearHistory());
+      if(route==='/api/comfy/jobs'&&req.method==='POST')return json(res,202,imageJobs.enqueue(b));
+      if(route==='/api/comfy/jobs'&&req.method==='GET')return json(res,200,imageJobs.list({offset:url.searchParams.get('offset'),limit:url.searchParams.get('limit')}));
+      const comfyJobRoute=route.match(/^\/api\/comfy\/jobs\/([^/]+)(?:\/(cancel|image))?$/);
+      if(comfyJobRoute){const [,id,action]=comfyJobRoute;
+        if(req.method==='GET'&&!action)return json(res,200,imageJobs.get(id));
+        if(req.method==='POST'&&action==='cancel')return json(res,200,imageJobs.cancel(id));
+        if(req.method==='GET'&&action==='image'){const j=imageJobs.get(id);if(!j.mediaId)throw new Error('结果图不存在');const row=assetMedia.metadata(j.mediaId,j.mediaName||'生成图');const data=readFileSync(assetMedia.file(j.mediaId));res.writeHead(200,{'Content-Type':row.type,'Content-Length':data.length,'Cache-Control':'no-store'});return res.end(data);}
+      }
       const sourceImport=route.match(/^\/api\/sources\/([^/]+)\/import$/);
       if(sourceImport&&req.method==='POST')return json(res,200,sources.importFile(sourceImport[1],b));
       const sharedRoute=route.match(/^\/api\/shared\/([^/]+)(?:\/(collect|template|image))?$/);
@@ -187,13 +247,14 @@ export async function createWorkbench({dataDir=path.join(ROOT,'data'),port=18765
         if(b.protocol==='account'||store.get('providers',String(b.id||''))?.protocol==='account')throw Error('账号连接请通过内置登录管理');
         if(jobs.active||lifecycle.locked)throw new Error('任务或模型操作执行中，连接配置暂不可修改');
         const old=store.get('providers',String(b.id||''));if(b.id&&!old)throw Error('连接不存在，请刷新后重新添加');if(old&&b.expectedUpdatedAt&&b.expectedUpdatedAt!==old.updatedAt)throw Error('连接已更新，请重新打开编辑');
-        const p=validateProvider({id:old?.id,name:b.name,protocol:b.protocol,baseUrl:b.baseUrl,model:String(b.model||'').slice(0,180),timeoutMs:Math.min(1800000,Math.max(10000,Number(b.timeoutMs)||300000)),exePath:String(b.exePath||''),modelPath:String(b.modelPath||''),mmprojPath:String(b.mmprojPath||''),gpuLayers:Number(b.gpuLayers)||0,ctxSize:Number(b.ctxSize)||4096});
+        const p=validateProvider({id:old?.id,name:b.name,protocol:b.protocol,baseUrl:b.baseUrl,model:String(b.model||'').slice(0,180),timeoutMs:Math.min(1800000,Math.max(10000,Number(b.timeoutMs)||300000)),exePath:String(b.exePath||''),modelsDir:String(b.modelsDir||''),managedRouter:b.managedRouter===true,modelPath:String(b.modelPath||''),mmprojPath:String(b.mmprojPath||''),gpuLayers:Number(b.gpuLayers)||0,ctxSize:Number(b.ctxSize)||4096});
         if(old&&(leaseKeys(old).length||lifecycle.started.has(old.id)))throw new Error('请先释放模型并停止此连接服务，再编辑配置');
         Object.assign(p,validateProvider({...p,tokenField:b.tokenField||'auto',temperatureMode:b.temperatureMode||'auto'}));
         p.sealedKey=b.clearKey?null:b.apiKey?await vault.seal(String(b.apiKey).trim()):old?.sealedKey;
         if(old?.modelPreferences)p.modelPreferences=old.modelPreferences;
         if(jobs.active||lifecycle.locked)throw Error('任务或模型操作执行中，连接配置暂不可修改');if(old&&store.get('providers',old.id)?.updatedAt!==old.updatedAt)throw Error('连接已更新，请重新打开编辑');if(old)store.remove('modelLists',old.id);
-        return json(res,200,store.publicProvider(store.put('providers',p)));
+        const savedProvider=store.put('providers',p);
+        return json(res,200,store.publicProvider(savedProvider));
       }
       if(route==='/api/models/discover'&&req.method==='POST'){
         const old=store.get('providers',String(b.id||'')),p=validateProvider({name:b.name||'连接',protocol:b.protocol,baseUrl:b.baseUrl,model:b.model||''});
@@ -204,11 +265,11 @@ export async function createWorkbench({dataDir=path.join(ROOT,'data'),port=18765
       const providerRoute=route.match(/^\/api\/providers\/([^/]+)\/(models|status|start|load|unload|stop)$/);
       if(providerRoute){const [,id,action]=providerRoute;const readVersion=['models','status'].includes(action)&&req.method==='GET'?(modelReadVersions.get(id)||0)+1:null;if(readVersion!==null)modelReadVersions.set(id,readVersion);if(store.get('providers',id)?.protocol==='account'&&!['models','status'].includes(action))throw Error('账号连接不使用本地模型启停操作');const p=await privateProvider(id);
         if(['models','status'].includes(action)&&req.method==='GET'){
-          const started=performance.now();try{const result=action==='models'?{models:await models(p),online:true}:await lifecycle.status(leasedProvider(p));if(!sameConnection(store.get('providers',p.id),p))throw new Error('连接已更改，请重新读取模型列表');if(result.error&&p.apiKey)result.error=result.error.split(p.apiKey).join('[密钥已隐藏]');if(readVersion!==modelReadVersions.get(id))return json(res,200,{...result,stale:true});if(result.models&&result.online)store.put('modelLists',{id:p.id,models:result.models.slice(0,2000),checkedAt:new Date().toISOString()});result.check=connections.recordCheck(p,result,performance.now()-started);return json(res,200,result);}catch(e){const message=p.apiKey?e.message.split(p.apiKey).join('[密钥已隐藏]'):e.message;if(readVersion===modelReadVersions.get(id)&&sameConnection(store.get('providers',p.id),p))connections.recordCheck(p,{online:false,error:message},performance.now()-started);throw new Error(message);}
+          const started=performance.now();try{const result=action==='models'?{models:await models(p),online:true}:await lifecycle.status(leasedProvider(p));if(!sameConnection(store.get('providers',p.id),p))throw new Error('连接已更改，请重新读取模型列表');if(result.error&&p.apiKey)result.error=result.error.split(p.apiKey).join('[密钥已隐藏]');if(readVersion!==modelReadVersions.get(id))return json(res,200,{...result,stale:true});if(result.models&&result.online)store.put('modelLists',{id:p.id,models:result.models.slice(0,2000),source:'upstream',checkedAt:new Date().toISOString()});result.check=connections.recordCheck(p,result,performance.now()-started);return json(res,200,result);}catch(e){const message=p.apiKey?e.message.split(p.apiKey).join('[密钥已隐藏]'):e.message;if(readVersion===modelReadVersions.get(id)&&sameConnection(store.get('providers',p.id),p))connections.recordCheck(p,{online:false,error:message},performance.now()-started);throw new Error(message);}
         }
         if(req.method!=='POST')throw new Error('生命周期操作需要 POST');
         if(jobs.active)throw new Error('请先完成或取消正在执行的任务');
-        try{const actual=['unload','stop'].includes(action)?leasedProvider(p):p;const result=await lifecycle.exclusive(()=>lifecycle[action](actual));if(result.error&&p.apiKey)result.error=result.error.split(p.apiKey).join('[密钥已隐藏]');return json(res,200,result);}catch(e){throw new Error(p.apiKey?e.message.split(p.apiKey).join('[密钥已隐藏]'):e.message);}
+        try{const started=performance.now(),actual=['unload','stop'].includes(action)?leasedProvider(p):p;const result=await lifecycle.exclusive(()=>lifecycle[action](actual));if(['start','load'].includes(action)&&result.online){const directory=Array.isArray(result.models)?result.models:await models(p);if(!sameConnection(store.get('providers',p.id),p))throw new Error('连接已更改，启动结果未写入目录');store.put('modelLists',{id:p.id,models:directory.slice(0,2000),source:'upstream',checkedAt:new Date().toISOString()});result.models=directory;}const status=Array.isArray(result.models)?result:typeof lifecycle.status==='function'?await lifecycle.status(actual):null;if(status&&typeof status.online==='boolean'&&sameConnection(store.get('providers',p.id),p))result.check=connections.recordCheck(p,status,performance.now()-started);if(result.error&&p.apiKey)result.error=result.error.split(p.apiKey).join('[密钥已隐藏]');return json(res,200,result);}catch(e){throw new Error(p.apiKey?e.message.split(p.apiKey).join('[密钥已隐藏]'):e.message);}
       }
       if(route==='/api/templates'&&req.method==='POST'){
         return json(res,200,saveTemplate(store,b));
@@ -224,42 +285,60 @@ export async function createWorkbench({dataDir=path.join(ROOT,'data'),port=18765
       if(route==='/api/batch'&&req.method==='POST'){
         if(!Array.isArray(b.inputs)||!b.inputs.length||b.inputs.length>50)throw new Error('每批需要 1–50 条输入');
         // 先统一验证，避免部分入队后才报错
-        const provider=store.get('providers',b.providerId),template=store.get('templates',b.templateId);if(!provider?.model||!template)throw new Error('请配置模型与模板');
+        const provider=store.get('providers',b.providerId),template=store.get('templates',b.templateId);if(!provider||!template)throw new Error('请配置连接与模板');
         for(const input of b.inputs){if(typeof input!=='string'||!input.trim()||input.length>60000)throw new Error('批量输入无效');}
         return json(res,202,{jobs:jobs.enqueueBatch(b.inputs.map(input=>({...b,input,images:[]})))});
       }
       const jobRoute=route.match(/^\/api\/jobs\/([^/]+)(?:\/(cancel|retry|archive))?$/);
       if(jobRoute){const [,id,action]=jobRoute;const j=store.get('jobs',id);if(!j)throw new Error('任务不存在');
-        if(req.method==='GET'&&!action)return json(res,200,j);
+        if(req.method==='GET'&&!action)return json(res,200,{...j,images:hydrateImages(store,j.images)});
         if(req.method==='POST'&&action==='archive')return json(res,200,imageBatch.collect(j));
         if(req.method==='POST'&&action==='cancel')return json(res,200,jobs.cancel(id));
         if(req.method==='POST'&&action==='retry'){if(['running','queued','cancelling'].includes(j.status))throw new Error('任务尚未结束');return json(res,202,jobs.retry(id));}
       }
       const deletion=route.match(/^\/api\/(templates|assets|providers)\/([^/]+)$/);
       if(deletion&&req.method==='DELETE'){if(jobs.active||jobs.queue.length||lifecycle.locked)throw new Error('任务或模型操作尚未完成，暂不可删除');const [,kind,id]=deletion;if(kind==='providers'){const p=store.get(kind,id);if(p&&(leaseKeys(p).length||lifecycle.started.has(id)))throw new Error('请先释放模型并停止服务');}const record=store.get(kind,id);if(!record)throw Error('记录不存在');store.backup();if(kind==='providers')store.remove(kind,id);else store.put(kind,{...record,deletedAt:new Date().toISOString()});return json(res,200,{deleted:true,recoverable:kind!=='providers'});}
-      if(route==='/api/export'&&req.method==='GET'){const result=store.export();return json(res,200,{...result,mediaFiles:assetMedia.exportFiles([...result.assets,...result.jobs.map(j=>({media:j.originalMedia||[]}))])});}
+      if(route==='/api/export'&&req.method==='GET'){const result=store.export();const comfyMedia=assetMedia.comfyJobMediaIds(result.comfyJobs).map(id=>({id}));return json(res,200,{...result,mediaFiles:assetMedia.exportFiles([...result.assets,...result.jobs.map(j=>({media:j.originalMedia||[]})),...result.jobs.map(j=>({media:(j.images||[]).filter(i=>i&&i.id)})),{media:comfyMedia}])});}
       if(route==='/api/backup'&&req.method==='POST')return json(res,200,{file:store.backup()});
       if(route==='/api/import'&&req.method==='POST'){
         if(jobs.active||jobs.queue.length)throw new Error('任务执行中不能恢复');
         for(const p of b.providers||[])validateProvider(p);
         for(const t of b.templates||[])if(typeof t.system!=='string'||typeof t.user!=='string'||!t.name)throw new Error('备份模板无效');
-        const importedMedia=assetMedia.importFiles(b.mediaFiles);try{assetMedia.validateReferences([...(b.assets||[]),...(b.jobs||[]).map(j=>({media:j.originalMedia||[]}))]);return json(res,200,store.import(b));}catch(e){assetMedia.rollbackImport(importedMedia);throw e;}
+        const importedMedia=assetMedia.importFiles(b.mediaFiles);try{assetMedia.validateReferences([...(b.assets||[]),...(b.jobs||[]).map(j=>({media:j.originalMedia||[]})),...(b.jobs||[]).map(j=>({media:(j.images||[]).filter(i=>i&&i.id)}))]);
+        // comfyJobs 缺图检查：导入后对缺图引用标记，不假装 succeeded 记录可用。
+        const missingComfy=new Set(assetMedia.missingComfyMedia(b.comfyJobs||[]));
+        const result=store.import(b);
+        for(const j of b.comfyJobs||[]){
+          const refs=assetMedia.comfyJobMediaIds([j]);
+          if(refs.some(id=>missingComfy.has(id))){
+            const cur=store.get('comfyJobs',j.id);
+            if(cur)store.put('comfyJobs',{...cur,mediaMissing:true,error:(cur.error?cur.error+'; ':'')+'备份缺图，结果/输入图不可用'});
+          }
+        }
+        return json(res,200,{...result,missingComfyMedia:missingComfy.size});}catch(e){assetMedia.rollbackImport(importedMedia);throw e;}
       }
       if(route==='/api/shutdown'&&req.method==='POST'){json(res,200,{stopping:true});setImmediate(()=>close());return;}
+      if(route==='/api/restart'&&req.method==='POST'){json(res,200,{restarting:true});setImmediate(()=>close(true));return;}
       return json(res,404,{error:'接口不存在'});
     }catch(e){return json(res,400,{error:String(e.message||e).slice(0,1200)});}
   });
   server.requestTimeout=30000;
-  async function close(){if(stopping)return;stopping=true;const done=await jobs.shutdown();if(!done){stopping=false;jobs.closing=false;console.error('任务仍在释放模型，工作台暂未退出，请稍后重试关闭');return;}
+  function scheduleRestart(){
+    const {file,args}=restartCommand(ROOT);
+    const child=spawn(file,args,{cwd:ROOT,env:process.env,detached:true,stdio:'ignore',windowsHide:true});
+    child.unref();
+  }
+  async function close(restart=false){if(stopping)return;stopping=true;const done=await jobs.shutdown();if(!done){stopping=false;jobs.closing=false;console.error('任务仍在释放模型，工作台暂未退出，请稍后重试关闭');return;}
     await accounts.close();await inboxQueue.close();await dataOperations.settle();
     const inboxDeadline=Date.now()+20000;while(inbox.busy.size&&Date.now()<inboxDeadline)await new Promise(r=>setTimeout(r,100));if(inbox.busy.size){stopping=false;jobs.closing=false;console.error('X读取尚未结束，请稍后关闭');return;}
     await Promise.allSettled([...sharedCollection.pending.values()]);
-    await sources.close();await Promise.allSettled([...imageCache.pending.values(),...assetMedia.pending]);
+    await sources.close();poses.close();refs.close();const imageJobsReleased=await imageJobs.close();if(!imageJobsReleased)console.error('图像任务未完全释放，外部推理状态未知');await Promise.allSettled([...imageCache.pending.values(),...assetMedia.pending]);
     for(const saved of store.list('providers'))try{const p=leasedProvider(saved);if(leaseKeys(p).length)await lifecycle.exclusive(()=>lifecycle.unload(p));if(lifecycle.started.has(p.id))await lifecycle.exclusive(()=>lifecycle.stop(p));}catch(e){console.error('释放未确认：'+e.message);}
     store.backup();await new Promise(r=>server.close(r));store.close();
+    if(restart)scheduleRestart();
   }
   await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,'127.0.0.1',resolve);});
-  return {server,store,jobs,lifecycle,sources,imageCache,assetMedia,inbox,inboxQueue,timeline,close,port:server.address().port};
+  return {server,store,jobs,lifecycle,sources,poses,refs,imageJobs,imageCache,assetMedia,inbox,inboxQueue,timeline,close,port:server.address().port};
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
   const app=await createWorkbench({dataDir:process.env.PW_DATA_DIR||path.join(ROOT,'data'),port:Number(process.env.PW_PORT)||18765});

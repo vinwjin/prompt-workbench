@@ -25,6 +25,9 @@ jobs:
       - run: npm test
       - run: npm run check:release
       - run: npm run test:smoke
+      - run: npm run test:lifecycle
+      - run: node scripts/ui-image-studio.mjs
+      - run: node scripts/ui-llama.mjs
       - run: npm run test:ui
         env:
           PW_UI_EVIDENCE_DIR: work/ui-evidence

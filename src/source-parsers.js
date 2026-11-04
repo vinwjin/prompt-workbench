@@ -1,6 +1,7 @@
 import {createHash} from 'node:crypto';
 import {sourceVideoUrl} from './gallery-policy.js';
 import {repoMedia} from './source-media.js';
+import {coverUrl} from './image-cache.js';
 const digest=s=>createHash('sha256').update(s).digest('hex').slice(0,24);
 export function sourceLink(raw){try{const u=new URL(raw);return u.protocol==='https:'&&!u.username&&!u.password&&!u.port?u.href:'';}catch{return '';}}
 export function decodeHtml(text){return String(text||'').replace(/&#(x[\da-f]+|\d+);/gi,(_,n)=>{const v=n[0].toLowerCase()==='x'?parseInt(n.slice(1),16):Number(n);return v>0&&v<=0x10ffff?String.fromCodePoint(v):'';}).replace(/&(amp|lt|gt|quot|apos|nbsp);/g,(_,k)=>({amp:'&',lt:'<',gt:'>',quot:'"',apos:"'",nbsp:' '})[k]);}
@@ -38,4 +39,23 @@ export function parseVideoHtml(text,feed,url){const rows=[];if(feed.id==='s33'){
   for(const block of text.split(/<h2\b/i).slice(1)){const title=plain(block.match(/^[^>]*>([\s\S]*?)<\/h2>/i)?.[1]||''),content=plain(block.match(/<p\b[^>]*>([\s\S]*?)<\/p>/i)?.[1]||'');if(content.length>=20&&/^[“"‘]/.test(content))rows.push({title,content:content.replace(/^[“"‘]|[”"’]$/g,''),sourceUrl:url,originId:url+'#'+digest(title),author:feed.name,modelHint:new URL(url).pathname.split('/').pop(),description:feed.notice});}
   }else{const content=text.match(/Production prompt[\s\S]*?<p\b[^>]*>([\s\S]*?)<\/p>/i)?.[1];if(content)rows.push({title:plain(text.match(/<h1\b[^>]*>([\s\S]*?)<\/h1>/i)?.[1]||''),content:plain(content),sourceUrl:url,originId:url,author:feed.name,modelHint:'WAN · 版本见原站',description:feed.notice});}
   return rows;
+}
+// S41 花花AI小栈：同域 JSON API，条目效果图在 images[] 内（相对路径）；只收带效果图的完整条目。
+export function parseHuahuaGallery(text,feed){
+  const data=JSON.parse(text),rows=Array.isArray(data?.prompts)?data.prompts:[];
+  if(!rows.length)throw Error('花花AI小栈没有可读取的公开条目');
+  const abs=p=>{const u=p&&String(p).startsWith('/')?'https://huahuanook.com'+p:'';return coverUrl(u)?u:'';};
+  const out=[];
+  for(const r of rows){
+    const imgs=Array.isArray(r.images)?r.images.filter(i=>i&&i.mediumUrl):[];
+    const content=typeof r.prompt==='string'?r.prompt:'';
+    const frontCover=abs(imgs[0]?.mediumUrl);
+    if(!frontCover||content.trim().length<20)continue;
+    out.push({id:r.id,originId:r.id,title:r.title||content.slice(0,70),content,frontCover,
+      coverUrls:imgs.map(i=>abs(i.mediumUrl)).filter(Boolean).slice(0,8),
+      author:r.author||feed.name,modelHint:r.model||'',tags:Array.isArray(r.tags)?r.tags:'',negative:'',
+      sourceUrl:feed.url,license:feed.license,description:feed.notice,sourcePublishedAt:r.publishedAt||r.createdAt||''});
+  }
+  if(!out.length)throw Error('花花AI小栈没有带效果图的完整条目');
+  return out;
 }

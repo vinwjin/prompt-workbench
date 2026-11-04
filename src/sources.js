@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import {coverUrl} from './image-cache.js';
 import {parseRepoGallery} from './repo-gallery.js';
 import {EXTRA_FEEDS} from './source-catalog.js';
-import {parseSourceJson,parseSourceMarkdown,markdownFiles,parsePromptHtml,videoPages,parseVideoHtml,sourceLink} from './source-parsers.js';
+import {parseSourceJson,parseSourceMarkdown,markdownFiles,parsePromptHtml,videoPages,parseVideoHtml,parseHuahuaGallery,sourceLink} from './source-parsers.js';
 
 const BASE_FEEDS=[
   {id:'xrepo',name:'X 图文精选 · GPT-4o 案例',url:'https://github.com/jamez-bondos/awesome-gpt4o-images',license:'CC BY 4.0 · 图片 jamez-bondos；提示词作者见原帖',description:'中文图文案例，保留 X 原帖与作者；图片来自公开仓库，同步时校验图片后才更新目录。'},
@@ -15,7 +15,7 @@ const BASE_FEEDS=[
   {id:'prompts',name:'prompts.chat · 社区词库',url:'https://github.com/f/prompts.chat',license:'CC0-1.0 · 提示词数据',description:'社区共享提示词，缓存到本地后可离线浏览。'}
 ];
 BASE_FEEDS.push(...EXTRA_FEEDS);
-// Public distribution retains manual import for sources without verified automated-access permission.
+// Unknown automated-access rights stay manual-only in the public distribution.
 export const FEEDS=BASE_FEEDS.map(f=>['mother','s31','s38','s39','s40'].includes(f.id)||/未声明|未确认|逐条许可|未核实/.test(f.license)?{...f,syncable:false,notice:'公开版未确认自动读取权限；请访问原站，或导入你有权使用的文件。'}:f);
 const URLS={shortcut:['https://raw.githubusercontent.com/rockbenben/ChatGPT-Shortcut/main/src/data/prompt.json','https://cdn.jsdelivr.net/gh/rockbenben/ChatGPT-Shortcut@main/src/data/prompt.json'],prompts:['https://raw.githubusercontent.com/f/prompts.chat/main/prompts.csv','https://cdn.jsdelivr.net/gh/f/prompts.chat@main/prompts.csv']};
 URLS.xrepo=['https://cdn.jsdelivr.net/gh/jamez-bondos/awesome-gpt4o-images@main/README.md','https://raw.githubusercontent.com/jamez-bondos/awesome-gpt4o-images/main/README.md'];
@@ -76,7 +76,7 @@ export class Sources{
       if(feed.adapter==='recipes'||feed.id==='s26'||!rows.length){if(feed.id==='s26')rows=[];const files=markdownFiles(data.text,feed);for(const file of files){const part=await this.readRepo(feed,file);let items=parseSourceMarkdown(part.text,feed,file);if(feed.id==='s26'){const content=part.text.trim();if(content.length>=20)items=[{title:decodeURIComponent(file.split('/').pop().replace(/\.md$/i,'')).replaceAll('_',' '),content,originId:file,sourceUrl:feed.url+'/blob/main/'+file,author:feed.name,description:feed.notice}];}rows.push(...items);}}
       return {rows,url:data.url};
     }
-    const text=await this.read(feed.url);if(feed.adapter==='html-prompts')return {rows:parsePromptHtml(text,feed),url:feed.url};
+    const text=await this.read(feed.url);if(feed.adapter==='huahua')return {rows:parseHuahuaGallery(text,feed),url:feed.url};if(feed.adapter==='html-prompts')return {rows:parsePromptHtml(text,feed),url:feed.url};
     const rows=[];for(const url of videoPages(text,feed)){const detail=await this.read(url);rows.push(...parseVideoHtml(detail,feed,url));}return {rows,url:feed.url};
   }
   async sync(id,options={}){
@@ -126,7 +126,7 @@ export class Sources{
     let old=this.store.get('feeds',id)||{};
     if(mode==='restart')this.nanaDetails.clear();
     if(old.scanVersion!==OPENNANA_SCAN||mode==='restart'){old={...old,scanVersion:OPENNANA_SCAN,nextPage:1,lastPage:0,scannedTotal:0,detailTotal:0,eligibleTotal:0,rejectedTotal:0,lockedTotal:0,scanComplete:false};this.store.put('feeds',{...old,id});}
-    if(old.scanComplete&&mode==='full')return old;
+    if(old.scanComplete&&mode==='full')return this.syncOpenNanaIncremental(id,{batch});
     let current=page??old.nextPage??1;
     if(current===1&&old.scanComplete){old={...old,scannedTotal:0,detailTotal:0,eligibleTotal:0,rejectedTotal:0,lockedTotal:0,scanComplete:false};this.store.put('feeds',{...old,id,nextPage:1});}
     const stop=()=>this.closing||(batch&&this.batch?.status==='cancelling');
@@ -147,7 +147,7 @@ export class Sources{
       old=this.store.put('feeds',{...old,id,incrementalNextPage:current});
       const part=await openNanaPage(u=>this.readNana(u),id==='s39'?'video':'image',current,{stop,order:'DESC',sort:'reviewed_at',known:slug=>baseline.has(slug)||!!this.store.get('shared',id+'-'+hash(slug))});
       if(stop())return {...old,stopped:true};
-      const finished=!baseline.size||!part.nextPage||baseline.has(part.slugs.at(-1));pending=[...new Set([...pending,...part.slugs])].slice(0,200);
+      const lastSlug=part.slugs.at(-1);const finished=!part.nextPage||baseline.has(lastSlug)||(!!lastSlug&&!!this.store.get('shared',id+'-'+hash(lastSlug)));pending=[...new Set([...pending,...part.slugs])].slice(0,200);
       const extra={...old,incrementalNextPage:finished?null:part.nextPage,incrementalTotal:part.total,incrementalSeen:finished?pending:[...baseline],incrementalPendingSeen:finished?[]:pending,readStrategy:'latest-pages'};
       old=part.rows.length?this.ingestRows(id,part.rows,part.url,old.total,extra,{incremental:true}):this.store.put('feeds',{...extra,id,lastSync:new Date().toISOString(),lastAdded:0,lastError:null});
       added+=old.lastAdded||0;unchanged+=part.known;old=this.store.put('feeds',{...old,lastAdded:added,lastUnchanged:unchanged,readStrategy:'latest-pages'});
@@ -155,7 +155,7 @@ export class Sources{
     }while(current);return old;
   }
   async syncHistory(){
-    if(this.feed('s38').syncable===false)throw Error('公开版未确认自动读取权限；请访问原站，或导入你有权使用的文件。');
+    if(this.feed('s38').syncable===false)throw Error('公开版未确认自动读取权限；请访问原站或导入有权文件');
     if(this.closing||this.batchBusy()||this.syncing.size)throw Error('请等待来源同步结束');
     this.syncing.add('s38');const work=(async()=>{const files=[];for(const file of [...Array.from({length:10},(_,i)=>(i+1)*100+'.md'),'README.md']){const data=await this.readRepo({repo:'songguoxs/gpt4o-image-prompts',branch:'master'},file);files.push({file,text:data.text});}const h=historicalImages(files),old=this.store.get('feeds','s38')||{};return this.ingestRows('s38',h.rows,'historical-markdown:complete',old.total,{...old,historyCases:h.cases,historyEligible:h.eligible,historyReferences:h.references,historyRejected:h.rejected});})();this.inflight.add(work);try{return await work;}finally{this.inflight.delete(work);this.syncing.delete('s38');}
   }
@@ -197,7 +197,7 @@ export class Sources{
     for(const key of ['models','purposes','styles'])value[key]=this.store.db.prepare(`SELECT DISTINCT j.value FROM gallery_search g JOIN shared_summary s ON s.id=g.id,json_each(g.${key}) j WHERE s.eligible=1${media} ORDER BY j.value LIMIT 500`).all(...args).map(r=>r.value);
     this.facetsCache={stamp,value};return value;
   }
-  galleryList({source='',query='',offset=0,limit=50,kind='images',sort='latest',model='',purpose='',style='',author='',from='',to='',timeField='published',unknownDate=false}={}){
+  galleryList({source='',query='',offset=0,limit=50,kind='images',sort='published',model='',purpose='',style='',author='',from='',to='',timeField='published',unknownDate=false}={}){
     if(!['images','video','all'].includes(kind))throw Error('精品广场只提供图片或视频案例');
     if(!['latest','published','views','copies'].includes(sort)||!['published','collected'].includes(timeField))throw Error('排序或时间筛选无效');
     limit=Math.min(100,Math.max(1,Math.floor(Number(limit)||50)));offset=Math.max(0,Math.floor(Number(offset)||0));const q=String(query).toLowerCase();

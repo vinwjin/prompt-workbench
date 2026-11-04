@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import {mkdirSync,mkdtempSync} from 'node:fs';
 import path from 'node:path';
 import {generateKeyPairSync,sign} from 'node:crypto';
-import {createWorkbench} from './source-fixtures.js';
+process.env.PW_ANTIGRAVITY_OAUTH_CLIENT_ID='synthetic-client.apps.googleusercontent.com';
+process.env.PW_ANTIGRAVITY_OAUTH_CLIENT_SECRET='synthetic-oauth-registration';
+const {createWorkbench}=await import("./source-fixtures.js");
 
 function directory(){const root=path.resolve(process.env.PW_TEST_ROOT||'work');mkdirSync(root,{recursive:true});return mkdtempSync(path.join(root,'accounts-'));}
 async function client(app){const base='http://127.0.0.1:'+app.port,cookie=(await fetch(base)).headers.get('set-cookie').split(';')[0];return async(route,body,method)=>{const response=await fetch(base+'/api/'+route,{method:method||(body?'POST':'GET'),headers:{cookie,...(body?{'Content-Type':'application/json'}:{})},body:body?JSON.stringify(body):undefined});return {status:response.status,data:await response.json()};};}

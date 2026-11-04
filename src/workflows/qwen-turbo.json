@@ -1,0 +1,133 @@
+{
+  "2": {
+    "class_type": "LocalQwenEncode",
+    "inputs": {
+      "unet_name": "AtomicChat\\Qwen-Image-2.1-Turbo-AD-Q4_K.gguf",
+      "clip_name": "AtomicChat\\Qwen-Image-2.1-Turbo-Abliterated-Uncensored-Q4_K.gguf",
+      "vae_name": "qwen_image_2.1_vae_bf16.safetensors",
+      "width": 768,
+      "height": 1024,
+      "reference_size": 384,
+      "loader_options": "{}",
+      "lora_stack": "[{\"name\":\"qwen21-nsfw-image-edit.safetensors\",\"strength\":1,\"enabled\":false}]",
+      "reference_fit": "center",
+      "prompt": [
+        "11",
+        0
+      ],
+      "negative_prompt": [
+        "11",
+        1
+      ],
+      "references": [
+        "11",
+        2
+      ]
+    }
+  },
+  "3": {
+    "class_type": "SamplerCustom",
+    "inputs": {
+      "add_noise": true,
+      "noise_seed": 239091111501857,
+      "cfg": 1.5,
+      "model": [
+        "8",
+        0
+      ],
+      "positive": [
+        "2",
+        1
+      ],
+      "negative": [
+        "2",
+        2
+      ],
+      "sampler": [
+        "14",
+        0
+      ],
+      "sigmas": [
+        "15",
+        0
+      ],
+      "latent_image": [
+        "2",
+        3
+      ]
+    }
+  },
+  "4": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "3",
+        0
+      ],
+      "vae": [
+        "2",
+        4
+      ]
+    }
+  },
+  "5": {
+    "class_type": "SaveImageAdvanced",
+    "inputs": {
+      "filename_prefix": "pw/comfy",
+      "format": "png",
+      "format.bit_depth": "8-bit",
+      "format.input_color_space": "sRGB",
+      "images": [
+        "4",
+        0
+      ]
+    }
+  },
+  "6": {
+    "class_type": "LocalQwenCanvas",
+    "inputs": {
+      "ratio": "3:4",
+      "based_on": "宽度",
+      "size": 720,
+      "sizing_mode": "按比例计算",
+      "custom_width": 576,
+      "custom_height": 768
+    }
+  },
+  "8": {
+    "class_type": "ModelSamplingAuraFlow",
+    "inputs": {
+      "shift": 1,
+      "sampling": "flow",
+      "model": [
+        "2",
+        0
+      ]
+    }
+  },
+  "11": {
+    "class_type": "LocalQwenPrompt",
+    "inputs": {
+      "task": "文生图",
+      "prompt": "",
+      "negative_prompt": "",
+      "references_state": "[]",
+      "optimizer": "关闭",
+      "llama_model": "qwen3-vl-8b-ablit-q4km",
+      "read_media": false,
+      "optimizer_options": "{\"optimize_on_run\":false}"
+    }
+  },
+  "14": {
+    "class_type": "KSamplerSelect",
+    "inputs": {
+      "sampler_name": "euler"
+    }
+  },
+  "15": {
+    "class_type": "ManualSigmas",
+    "inputs": {
+      "sigmas": "1.0,0.978453,0.95418,0.926626,0.89508,0.845148,0.704534,0.414568,0.0"
+    }
+  }
+}

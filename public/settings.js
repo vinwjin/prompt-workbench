@@ -13,7 +13,7 @@ export class Settings {
     $('#settings-models').onclick=()=>this.c.show('models');
     this.palette();this.render();
   }
-  render(){const p=this.c.readState().providers||[],local=p.filter(x=>['router','ollama','llama'].includes(x.protocol)).length;$('#connection-overview').innerHTML=`<div><span class="kicker">连接概览</span><strong>${p.length} 个连接</strong><small>${p.length-local} 个在线 / 账号 · ${local} 个本地</small></div><p>目录读取、当前选模与生成测试各自保留状态。进入连接卡片可管理模型；测试生成由你主动发起。</p>`;$('#settings-connection-count').textContent=p.length+' 个已配置连接';}
+  render(){const p=this.c.readState().providers||[],local=p.filter(x=>['router','ollama','llama'].includes(x.protocol)).length;$('#settings-connection-count').textContent=p.length+' 个已配置连接（'+(p.length-local)+' 个在线 / 账号 · '+local+' 个本地）';}
   async load({fresh=false}={}){if(this.pending){if(!fresh)return this.pending;await this.pending.catch(()=>{});return this.load({fresh:true});}this.pending=this.readOverview(fresh);try{return await this.pending;}finally{this.pending=null;}}
   async readOverview(fresh=false){const serial=++this.serial;$('#data-overview-refresh').disabled=true;$('#data-overview-status').textContent='正在读取本机数据统计…';try{const d=await this.c.api('database/overview'+(fresh?'?refresh=1':''));if(serial!==this.serial)return;
       const db=d.database,backupBytes=d.backups.reduce((n,r)=>n+r.bytes,0),snapshotBytes=d.snapshots.reduce((n,r)=>n+r.bytes,0);

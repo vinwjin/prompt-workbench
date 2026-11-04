@@ -7,6 +7,9 @@ export function sourceImage(raw){try{const u=new URL(raw);if(u.protocol!=='https
   if(u.hostname==='images.meigen.ai'&&!u.search&&/^\/tweets\/\d+\/\d+\.(?:png|jpe?g|webp)$/i.test(p))return u.href;
   if(u.hostname==='bibigpt-apps.chatvid.ai'&&/^\/chatimg\/[\w-]+\.(?:png|jpe?g|webp)$/i.test(p)&&(!u.search||u.search==='?v=1'))return u.href;
   if(u.hostname==='img.opennana.com'&&!u.search&&/^\/prompts\/(?:images|assets)\/[A-Za-z0-9_/-]+\.(?:png|jpe?g|webp)$/i.test(p))return u.href;
+  if(u.hostname==='ai-pose-gallery.pages.dev'&&!u.search&&/^\/(?:thumbs|img)\/[A-Za-z0-9_]+\.(?:jpg|png)$/.test(p))return u.href;
+  if(u.hostname==='ai-portrait-gallery.pages.dev'&&!u.search&&/^\/img\/(?:thumb\/[A-Za-z0-9]+\.webp|full\/[A-Za-z0-9]+\.png)$/.test(p))return u.href;
+  if(u.hostname==='ai-costume-gallery.pages.dev'&&!u.search&&/^\/(?:thumbs\/[A-Za-z0-9_-]+\.webp|png\/[A-Za-z0-9_-]+\.png)$/.test(p))return u.href;
   return '';
 }catch{return '';}}
 export function repoMedia(raw,feed,file=feed.path||'README.md'){try{if(!raw||!feed.repo)return '';const root=/^(?:assets|imgs|cases|data\/images|public\/images)\//.test(raw)?'README.md':file;const candidate=/^https:\/\//.test(raw)?raw:new URL(raw,`https://gcore.jsdelivr.net/gh/${feed.repo}@main/${root}`).href;return sourceImage(candidate);}catch{return '';}}

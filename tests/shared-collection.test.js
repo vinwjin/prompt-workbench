@@ -49,7 +49,7 @@ test('多个原图保持顺序和标签；禁用来源只能取本地缓存；�
   try{
     const item=app.store.get('shared','case');app.store.put('shared',{...item,coverUrls:[url,'https://img.alicdn.com/second.png'],imageLabels:['第一张','第二张'],videoUrl:'https://img.opennana.com/prompts/assets/videos/test.mp4'});
     const a=(await call('shared/case/collect',{})).data;assert.deepEqual(a.media.map(m=>m.name),['第一张','第二张']);
-    const pack=(await call('assets/export',{ids:[a.id]})).data;other=await fixture();const imported=await other.call('assets/import',pack);assert.equal(imported.status,200);const moved=(await other.call('state')).data.assets.find(r=>r.title===a.title);assert.deepEqual(moved.collectionMedia,a.collectionMedia);assert.equal(moved.media.length,2);
+    const pack=(await call('assets/export',{ids:[a.id]})).data;other=await fixture();const imported=await other.call('assets/import',pack);assert.equal(imported.status,200);const movedId=(await other.call('assets')).data.items.find(r=>r.title===a.title).id;const moved=(await other.call('assets/'+movedId)).data;assert.deepEqual(moved.collectionMedia,a.collectionMedia);assert.equal(moved.media.length,2);
     const feed=app.sources.feed.bind(app.sources);app.sources.feed=id=>({...feed(id),syncable:false});app.store.put('shared',{...item,id:'blocked',originId:'blocked',coverUrls:['https://img.alicdn.com/not-cached.png']});
     const blocked=(await call('shared/blocked/collect',{})).data;assert.equal(blocked.media.length,0);assert.equal(blocked.collectionMedia.failures.length,1);assert.equal(reads,2);
     await call('assets/manage',{action:'trash',ids:[a.id]});const restored=(await call('shared/case/collect',{})).data;assert.equal(restored.id,a.id);assert.equal(restored.deletedAt,null);assert.equal(restored.media.length,2);

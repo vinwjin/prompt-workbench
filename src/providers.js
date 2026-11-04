@@ -1,10 +1,12 @@
 import {streamGeneration,visibleText} from './streaming.js';
 import {accountModels,generateAccount} from './account-inference.js';
 import {accountBase} from './accounts.js';
+import {isManagedRouterBaseUrl} from './llama-router.js';
 export function validateProvider(p){
   if(!p||!String(p.name||'').trim())throw new Error('连接名称不能为空');
   if(!['openai','anthropic','gemini','ollama','router','llama','account'].includes(p.protocol))throw new Error('接口协议无效');
   if(p.protocol==='account'&&p.baseUrl!==accountBase(p.accountPlatform,p.accountRegion))throw Error('账号连接必须使用对应平台固定服务地址');
+  if(p.managedRouter===true&&(p.protocol!=='router'||!isManagedRouterBaseUrl(p.baseUrl)))throw Error('托管 Router 必须使用带显式端口的 http://127.0.0.1:<端口>/v1 地址');
   const url=new URL(p.baseUrl);const local=['127.0.0.1','localhost','[::1]'].includes(url.hostname);
   if(url.username||url.password||url.search||url.hash)throw new Error('服务地址不能包含凭据、查询参数或片段');
   if(url.protocol!=='https:'&&!(url.protocol==='http:'&&local))throw new Error('在线接口必须使用 HTTPS；HTTP 只允许本机地址');
@@ -14,8 +16,8 @@ export function validateProvider(p){
   return {...p,name:String(p.name).trim().slice(0,100),baseUrl:url.href.replace(/\/$/,'')};
 }
 export function rootUrl(p){return p.baseUrl.replace(/\/(v1|v1beta)\/?$/,'');}
-export async function request(url,{method='GET',headers={},body,signal,timeout=120000}={}){
-  let res;try{res=await fetch(url,{method,headers:{...headers,...(body?{'Content-Type':'application/json'}:{})},body:body?JSON.stringify(body):undefined,signal:AbortSignal.any([AbortSignal.timeout(timeout),...(signal?[signal]:[])]),redirect:'error'});}catch(e){if(signal?.aborted)throw e;throw new Error(e.name==='TimeoutError'?'模型服务响应超时，请检查服务状态与超时设置。':'无法连接所选模型服务，请检查地址、服务是否运行及网络连接。');}
+export async function request(url,{method='GET',headers={},body,signal,timeout=120000,fetchFn=fetch}={}){
+  let res;try{res=await fetchFn(url,{method,headers:{...headers,...(body?{'Content-Type':'application/json'}:{})},body:body?JSON.stringify(body):undefined,signal:AbortSignal.any([AbortSignal.timeout(timeout),...(signal?[signal]:[])]),redirect:'error'});}catch(e){if(signal?.aborted)throw e;throw new Error(e.name==='TimeoutError'?'模型服务响应超时，请检查服务状态与超时设置。':'无法连接所选模型服务，请检查地址、服务是否运行及网络连接。');}
   const text=await res.text();let data;try{data=JSON.parse(text);}catch{data={error:{message:text.slice(0,200)}};}
   if(!res.ok)throw new Error(`HTTP ${res.status}：${data.error?.message||data.message||'模型服务请求失败'}`);
   return data;
@@ -42,13 +44,13 @@ export async function generate(p,input,signal){
   if(typeof output!=='string'||!output.trim())throw new Error('模型没有返回可用正文，请检查模型能力或 token 限制');
   output=visibleText(output);if(!output)throw Error('模型只有思考内容，没有可用正文');input.onProgress?.(output);return {output,usage,finishReason,truncated:['length','MAX_TOKENS','max_tokens'].includes(finishReason)};
 }
-export async function models(p){
+export async function models(p,{fetchFn=fetch}={}){
   if(p.protocol==='account')return accountModels(p);
   let url=p.baseUrl+'/models',headers=p.apiKey?{Authorization:'Bearer '+p.apiKey}:{};
   if(p.protocol==='anthropic')headers={'x-api-key':p.apiKey||'','anthropic-version':'2023-06-01'};
   if(p.protocol==='gemini')headers={'x-goog-api-key':p.apiKey||''};
   if(p.protocol==='ollama')url=rootUrl(p)+'/api/tags';
-  const data=await request(url,{headers,timeout:15000});
+  const data=await request(url,{headers,timeout:15000,fetchFn});
   const rows=data.data||data.models;if(!Array.isArray(rows))throw Error('模型目录响应格式无效：需要模型数组');
   return rows.slice(0,2000).filter(m=>m&&typeof(m.id||m.name)==='string'&&(m.id||m.name).trim()).map(m=>{const vision=typeof m.capabilities?.vision==='boolean'?m.capabilities.vision:Array.isArray(m.input_modalities)&&m.input_modalities.length?m.input_modalities.includes('image'):undefined;return {id:m.id||m.name,status:m.status?.value||m.status||'available',...(vision!==undefined?{vision}:{})};});
 }

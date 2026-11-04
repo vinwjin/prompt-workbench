@@ -3,7 +3,7 @@ import assert from'node:assert/strict';
 import{mkdirSync,mkdtempSync}from'node:fs';
 import path from'node:path';
 import{parseRepoGallery,repoImage}from'../src/repo-gallery.js';
-import{Sources}from './source-fixtures.js';
+import{Sources}from'./source-fixtures.js';
 import{Store}from'../src/store.js';
 const fixture='### 案例 100：建筑模型 (by [@artist](https://x.com/artist))\n[原文链接](https://x.com/artist/status/123)\n<img src="cases/100/model.png">\n**提示词**\n```\n自然光建筑模型\n```';
 test('仓库图文解析保留正确原帖/提示词/图片/作者，图片范围只限核实仓库路径',()=>{const rows=parseRepoGallery(fixture);assert.equal(rows.length,1);assert.equal(rows[0].content,'自然光建筑模型');assert.equal(rows[0].author,'@artist');assert.equal(rows[0].sourceUrl,'https://x.com/artist/status/123');assert.ok(repoImage(rows[0].frontCover));assert.equal(repoImage(rows[0].frontCover.replace('jamez-bondos','someone')),'');assert.equal(repoImage(rows[0].frontCover+'?redirect=evil'),'');assert.throws(()=>parseRepoGallery(fixture.replace('cases/100/model.png','https://evil.test/a.png')),/格式/);});

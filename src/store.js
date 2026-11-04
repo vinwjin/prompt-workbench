@@ -1,3 +1,4 @@
+import {importWorkflow} from './comfyui-import.js';
 import {initMetadata,projectMetadata,validateNote} from './gallery-metadata.js';
 import {validateAuthorState} from './x-timeline.js';
 import {sourceVideoUrl,galleryEligible} from './gallery-policy.js';
@@ -14,7 +15,13 @@ import {qualityRules,checkQuality} from './quality.js';
 import {mediaMetadata} from './asset-media.js';
 import {collectionMedia} from './collection-media.js';
 import {validateModelPreferences} from './connection-management.js';
+import {validateBaseUrl} from './comfyui-client.js';
 
+// 资产摘要：列表与收藏判断用；去掉修订历史、导入原文这两个重字段，保留正文供前端筛选/预览，详情/编辑按 id 取全文。
+export function summarizeAsset(a){
+  const {versions,importInfo,...rest}=a;
+  return {...rest,versionsCount:(Array.isArray(versions)?versions.length:0)};
+}
 export class Store {
   constructor(dir) {
     this.dir=path.resolve(dir); mkdirSync(this.dir,{recursive:true});
@@ -30,9 +37,10 @@ export class Store {
     initMetadata(this);
     const stale=this.db.prepare("SELECT r.body,r.updated FROM records r LEFT JOIN shared_summary s ON s.id=r.id WHERE r.kind='shared' AND (s.id IS NULL OR s.updated<>r.updated)").all();
     this.db.exec('BEGIN');try{for(const r of stale)this.projectShared(JSON.parse(r.body),r.updated);this.db.exec("DELETE FROM shared_summary WHERE id NOT IN (SELECT id FROM records WHERE kind='shared'); COMMIT;");}catch(e){this.db.exec('ROLLBACK');throw e;}
-    this.revision=0;this.kindRevisions=new Map();
+    this.revision=0;this.kindRevisions=new Map();this._backupTimer=null;this._backupDirtySince=0;this._backupError=null;this._backupDebounce=30000;this._backupMaxWait=120000;
     if(version===0)for(const t of BUILTINS) this.put('templates',{...t,builtin:true});
     for(const j of this.list('jobs')) if(['running','queued','cancelling'].includes(j.status)) this.put('jobs',{...j,status:'interrupted',error:'上次运行中断，结果未知；请确认后手动重试',finishedAt:new Date().toISOString()});
+    for(const j of this.list('comfyJobs')) if(['running','queued','cancelling'].includes(j.status)) this.put('comfyJobs',{...j,status:'interrupted',error:'上次运行中断，结果未知；请确认后手动重试',finishedAt:new Date().toISOString()});
     this.backup();
   }
   get(kind,id){const r=this.db.prepare('SELECT body FROM records WHERE kind=? AND id=?').get(kind,id);return r?JSON.parse(r.body):null;}
@@ -43,6 +51,19 @@ export class Store {
     const args=[query,query,status,status,providerId,providerId,trash?1:0,trash?1:0];
     const total=this.db.prepare(`SELECT count(*) AS total FROM records WHERE ${filter}`).get(...args).total;
     const jobs=this.db.prepare(`SELECT json_remove(body,'$.images') AS body,coalesce(json_array_length(body,'$.images'),0) AS imageCount FROM records WHERE ${filter} ORDER BY updated DESC,id LIMIT ? OFFSET ?`).all(...args,limit,offset).map(r=>({...JSON.parse(r.body),imageCount:r.imageCount}));
+    return {jobs,total,offset,limit};
+  }
+  // 任务摘要：主 state 与历史列表用；去掉正文重字段，input 截断保留供列表预览，完整正文仍按 id 取全文。
+  jobSummaryPage({offset=0,limit=250}={}){
+    const jobs=this.db.prepare(`SELECT json_object('id',id,'status',json_extract(body,'$.status'),'phase',json_extract(body,'$.phase'),'model',json_extract(body,'$.model'),'providerId',json_extract(body,'$.providerId'),'providerName',json_extract(body,'$.providerName'),'templateName',json_extract(body,'$.templateName'),'createdAt',json_extract(body,'$.createdAt'),'updatedAt',json_extract(body,'$.updatedAt'),'startedAt',json_extract(body,'$.startedAt'),'finishedAt',json_extract(body,'$.finishedAt'),'deletedAt',json_extract(body,'$.deletedAt'),'error',substr(coalesce(json_extract(body,'$.error'),''),1,300),'input',substr(coalesce(json_extract(body,'$.input'),''),1,130),'source',json_extract(body,'$.source'),'connectionTest',json_extract(body,'$.connectionTest'),'truncated',json_extract(body,'$.truncated'),'parentJobId',json_extract(body,'$.parentJobId'),'iterationDepth',json_extract(body,'$.iterationDepth'),'imageBatchId',json_extract(body,'$.imageBatchId'),'release',json_extract(body,'$.release'),'quality',json_extract(body,'$.quality'),'metrics',json_extract(body,'$.metrics')) AS body FROM records WHERE kind='jobs' AND json_extract(body,'$.deletedAt') IS NULL ORDER BY updated DESC,id LIMIT ? OFFSET ?`).all(limit,offset).map(r=>JSON.parse(r.body));
+    return {jobs,offset,limit};
+  }
+  // 历史列表摘要：兼容 jobPage 的查询/状态/连接/回收站筛选与分页/总数/图片数，但只下发摘要字段（去 output/compiled/完整 input），完整正文经 jobs/:id 按需取。
+  jobHistoryPage({offset=0,limit=100,query='',status='',providerId='',trash=false}={}){
+    const filter="kind='jobs' AND (?='' OR instr(lower(coalesce(json_extract(body,'$.input'),'')||' '||coalesce(json_extract(body,'$.output'),'')||' '||coalesce(json_extract(body,'$.status'),'')||' '||coalesce(json_extract(body,'$.model'),'')||' '||coalesce(json_extract(body,'$.providerName'),'')||' '||coalesce(json_extract(body,'$.templateName'),'')),lower(?))>0) AND (?='' OR json_extract(body,'$.status')=?) AND (?='' OR json_extract(body,'$.providerId')=?) AND ((?=1 AND json_extract(body,'$.deletedAt') IS NOT NULL) OR (?=0 AND json_extract(body,'$.deletedAt') IS NULL))";
+    const args=[query,query,status,status,providerId,providerId,trash?1:0,trash?1:0];
+    const total=this.db.prepare(`SELECT count(*) AS total FROM records WHERE ${filter}`).get(...args).total;
+    const jobs=this.db.prepare(`SELECT json_object('id',id,'status',json_extract(body,'$.status'),'phase',json_extract(body,'$.phase'),'model',json_extract(body,'$.model'),'providerId',json_extract(body,'$.providerId'),'providerName',json_extract(body,'$.providerName'),'templateName',json_extract(body,'$.templateName'),'createdAt',json_extract(body,'$.createdAt'),'updatedAt',json_extract(body,'$.updatedAt'),'startedAt',json_extract(body,'$.startedAt'),'finishedAt',json_extract(body,'$.finishedAt'),'deletedAt',json_extract(body,'$.deletedAt'),'error',substr(coalesce(json_extract(body,'$.error'),''),1,300),'input',substr(coalesce(json_extract(body,'$.input'),''),1,130),'source',json_extract(body,'$.source'),'connectionTest',json_extract(body,'$.connectionTest'),'truncated',json_extract(body,'$.truncated'),'parentJobId',json_extract(body,'$.parentJobId'),'iterationDepth',json_extract(body,'$.iterationDepth'),'imageBatchId',json_extract(body,'$.imageBatchId'),'release',json_extract(body,'$.release'),'quality',json_extract(body,'$.quality'),'metrics',json_extract(body,'$.metrics'),'imageCount',coalesce(json_array_length(body,'$.images'),0)) AS body FROM records WHERE ${filter} ORDER BY updated DESC,id LIMIT ? OFFSET ?`).all(...args,limit,offset).map(r=>JSON.parse(r.body));
     return {jobs,total,offset,limit};
   }
   kindRevision(kind){return this.kindRevisions.get(kind)||0;}
@@ -65,11 +86,11 @@ export class Store {
   remove(kind,id){this.db.prepare('DELETE FROM records WHERE kind=? AND id=?').run(kind,id);this.changed(kind);}
   diagnostics(){return {integrity:Object.values(this.db.prepare('PRAGMA quick_check').get())[0],schema:this.db.prepare('PRAGMA user_version').get().user_version,journalMode:this.db.prepare('PRAGMA journal_mode').get().journal_mode,bytes:this.db.prepare('PRAGMA page_count').get().page_count*this.db.prepare('PRAGMA page_size').get().page_size,counts:this.db.prepare('SELECT kind,count(*) AS total,sum(json_extract(body,\'$.deletedAt\') IS NOT NULL) AS trash FROM records GROUP BY kind').all(),indexes:this.db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'records_%'").all().map(r=>r.name)};}
   publicProvider(p){if(!p)return null;const {sealedKey,apiKey,accountCredentials,accountFetcher,accessToken,refreshToken,idToken,...rest}=p;return {...rest,hasKey:!!sealedKey};}
-  export(){return {schema:'prompt-workbench/v1',exportedAt:new Date().toISOString(),templates:this.list('templates'),inbox:this.list('inbox'),inboxBatches:this.list('inboxBatches'),inboxAuthors:this.list('inboxAuthors'),assets:this.list('assets'),snippets:this.list('snippets'),jobs:this.list('jobs'),drafts:this.list('drafts'),folders:this.list('folders'),galleryNotes:this.list('galleryNotes'),providers:this.list('providers').map(p=>this.publicProvider(p))};}
+  export(){return {schema:'prompt-workbench/v1',exportedAt:new Date().toISOString(),templates:this.list('templates'),inbox:this.list('inbox'),inboxBatches:this.list('inboxBatches'),inboxAuthors:this.list('inboxAuthors'),assets:this.list('assets'),snippets:this.list('snippets'),jobs:this.list('jobs'),drafts:this.list('drafts'),folders:this.list('folders'),galleryNotes:this.list('galleryNotes'),comfyJobs:this.list('comfyJobs'),comfySettings:this.list('comfySettings'),comfyWorkflows:this.list('comfyWorkflows'),providers:this.list('providers').map(p=>this.publicProvider(p))};}
   import(data){
     if(data?.schema!=='prompt-workbench/v1')throw new Error('不是提示词工坊 v1 备份');
-    const kinds=['templates','assets','jobs','drafts','providers','folders','inbox','snippets','inboxBatches','inboxAuthors','galleryNotes'];
-    data={...data,folders:data.folders||[],inbox:data.inbox||[],snippets:data.snippets||[],inboxBatches:data.inboxBatches||[],inboxAuthors:data.inboxAuthors||[],galleryNotes:data.galleryNotes||[]};
+    const kinds=['templates','assets','jobs','drafts','providers','folders','inbox','snippets','inboxBatches','inboxAuthors','galleryNotes','comfyJobs','comfySettings','comfyWorkflows'];
+    data={...data,folders:data.folders||[],inbox:data.inbox||[],snippets:data.snippets||[],inboxBatches:data.inboxBatches||[],inboxAuthors:data.inboxAuthors||[],galleryNotes:data.galleryNotes||[],comfyJobs:data.comfyJobs||[],comfySettings:data.comfySettings||[],comfyWorkflows:data.comfyWorkflows||[]};
     for(const k of kinds){
       if(!Array.isArray(data[k])||data[k].length>10000)throw new Error(`备份 ${k} 列表无效`);
       for(const row of data[k]){
@@ -84,12 +105,17 @@ export class Store {
         if(k==='assets'){mediaMetadata(row.media||[]);collectionMedia(row.collectionMedia);}
         if(k==='jobs'&&(!text('input')||!text('createdAt')||!['queued','running','cancelling','cancelled','succeeded','failed','interrupted'].includes(row.status)))throw new Error('备份任务无效');
         if(k==='jobs'&&row.originalMedia!==undefined)mediaMetadata(row.originalMedia);
-        if(k==='jobs'&&row.images!==undefined&&(!Array.isArray(row.images)||row.images.length>4||row.images.some(i=>!i||typeof i.dataUrl!=='string'||i.dataUrl.length>3e6||!/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(i.dataUrl))))throw new Error('备份任务图片无效');
+        if(k==='jobs'&&row.images!==undefined&&(!Array.isArray(row.images)||row.images.length>4||row.images.some(i=>{const okData=i&&typeof i.dataUrl==='string'&&i.dataUrl.length<=3e6&&/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(i.dataUrl);const okRef=i&&typeof i.id==='string'&&/^[a-f0-9]{64}$/.test(i.id)&&/^image\/(png|jpeg|webp)$/.test(i.type||'');return !okData&&!okRef;})))throw new Error('备份任务图片无效');
         if(k==='providers'&&(!text('name')||!text('model')||!text('baseUrl')||!text('protocol')))throw new Error('备份连接无效');
         if(k==='providers')validateModelPreferences(row.modelPreferences);
         if(k==='drafts'&&!text('input'))throw new Error('备份草稿无效');
         if(k==='folders'&&!text('name'))throw new Error('备份文件夹无效');
         if(k==='snippets')snippetData(row);
+        if(k==='comfyJobs'&&(!text('recipeId')||!text('createdAt')||!['queued','running','cancelling','cancelled','succeeded','failed','interrupted'].includes(row.status)))throw new Error('备份图像任务无效');
+        if(k==='comfyJobs'&&row.mediaId!=null&&!/^[a-f0-9]{64}$/.test(String(row.mediaId)))throw new Error('备份图像任务结果图无效');
+        if(k==='comfySettings'&&(row.id!=='default'||!text('baseUrl')))throw new Error('备份 ComfyUI 设置无效');
+        if(k==='comfyWorkflows'&&(!text('name')||!row.workflow||row.id!==importWorkflow(row.workflow,row.name).id))throw new Error('备份工作流无效');
+        if(k==='comfySettings')validateBaseUrl(row.baseUrl); // 拒绝导入公网/伪局域网地址，防止恢复后把私人参考图发往公网
         if(['jobs','drafts'].includes(k)&&row.qualityRules!==undefined)qualityRules(row.qualityRules);
         if(k==='inbox'&&(!/^(?:\d{10,25}|hh-(?:[a-f\d]{12}|\d{5,25}))$/.test(row.id)||!text('url')||!Array.isArray(row.posts)||row.posts.length>31||row.posts.some(p=>!p||typeof p.text!=='string'||typeof p.id!=='string'||!Array.isArray(p.images))))throw Error('备份收件箱无效');
         if(k==='inbox'){for(const value of [row,...row.posts]){if(value.videos!==undefined&&(!Array.isArray(value.videos)||value.videos.length>4||value.videos.some(u=>!sourceVideoUrl(u))))throw Error('备份视频地址无效');if(value.metricHistory!==undefined&&(!Array.isArray(value.metricHistory)||value.metricHistory.length>30||value.metricHistory.some(s=>!s||!Number.isFinite(Date.parse(s.at))||s.provider!=='fxembed'||!s.metrics||['likes','reposts','replies','quotes','views'].some(k=>s.metrics[k]!==null&&(!Number.isSafeInteger(s.metrics[k])||s.metrics[k]<0)))))throw Error('互动快照备份无效');}}
@@ -101,13 +127,19 @@ export class Store {
       if(this.get(k,row.id))continue; // 合并恢复：不覆盖当前记录与凭据
       const safe=k==='providers'&&row.protocol==='account'?Object.fromEntries(Object.entries(row).filter(([key])=>['id','name','protocol','accountPlatform','accountRegion','baseUrl','model','timeoutMs','modelPreferences','accountLabel'].includes(key))):{...row};delete safe.sealedKey;delete safe.apiKey;delete safe.hasKey;
       if(k==='providers'&&safe.protocol==='account'){safe.accountStatus='signed-out';safe.accountEpoch=randomUUID();}
+      if(k==='comfyWorkflows'){for(const key of Object.keys(safe))delete safe[key];Object.assign(safe,importWorkflow(row.workflow,row.name));}
       if(k==='inboxBatches'&&['running','cancelling'].includes(safe.status)){safe.status='interrupted';safe.items=safe.items.map(i=>['queued','running'].includes(i.status)?{...i,status:'interrupted'}:i);}
       if(k==='templates'){safe.variableSchema=schema(row.variableSchema);if(row.revisions)safe.revisions=row.revisions.map(v=>({...v,variableSchema:schema(v.variableSchema)}));}
       if(k==='jobs'&&row.quality!==undefined){try{safe.quality=checkQuality(typeof row.output==='string'?row.output:'',row.qualityRules);}catch{safe.quality={error:'检查不可用，正文仍保留'};}}
       if(k==='jobs'&&['running','queued','cancelling'].includes(safe.status)){safe.status='interrupted';safe.error='导入的未完成任务不会自动执行';}
+      if(k==='comfyJobs'&&['running','queued','cancelling'].includes(safe.status)){safe.status='interrupted';safe.error='导入的未完成任务不会自动执行';}
       this.put(k,safe);imported++;
     }this.db.exec('COMMIT');}catch(e){this.db.exec('ROLLBACK');throw e;}return {imported,mode:'merge-preserve-existing'};
   }
-  backup(){const dir=path.join(this.dir,'backups');mkdirSync(dir,{recursive:true});const file=path.join(dir,`backup-${Date.now()}-${randomUUID().slice(0,8)}.json`);writeFileSync(file+'.tmp',JSON.stringify(this.export(),null,2));renameSync(file+'.tmp',file);const files=readdirSync(dir).filter(n=>/^backup-.*\.json$/.test(n)).sort();for(const n of files.slice(0,-20))unlinkSync(path.join(dir,n));return file;}
-  close(){this.db.close();}
+  backup(){const dir=path.join(this.dir,'backups');mkdirSync(dir,{recursive:true});const file=path.join(dir,`backup-${Date.now()}-${randomUUID().slice(0,8)}.json`);writeFileSync(file+'.tmp',JSON.stringify(this.export(),null,2));renameSync(file+'.tmp',file);const files=readdirSync(dir).filter(n=>/^backup-.*\.json$/.test(n)).sort();for(const n of files.slice(0,-20))unlinkSync(path.join(dir,n));this._backupTimer&&clearTimeout(this._backupTimer);this._backupTimer=null;this._backupDirtySince=0;if(this._backupError){this._backupError=null;this.revision++;}return file;}
+  // 任务完成等热路径不再同步全量备份：标记脏，30s 防抖、最迟 120s 落盘；关闭/删除/导入前仍走同步 backup()。
+  backupStatus(){return {pending:!!this._backupDirtySince,error:this._backupError};}
+  scheduledBackup(){try{return this.backup();}catch(e){this._backupError={at:new Date().toISOString(),code:e.code||'BACKUP_FAILED',message:'自动备份未成功，请检查磁盘空间和目录权限后手动备份。'};this.revision++;console.error('自动备份失败：'+(e.code||'BACKUP_FAILED'));}}
+  scheduleBackup(){const now=Date.now();if(!this._backupDirtySince)this._backupDirtySince=now;if(now-this._backupDirtySince>=this._backupMaxWait)return this.scheduledBackup();if(this._backupTimer)return;this._backupTimer=setTimeout(()=>{this._backupTimer=null;this.scheduledBackup();},this._backupDebounce);this._backupTimer.unref?.();}
+  close(){clearTimeout(this._backupTimer);this._backupTimer=null;this.db.close();}
 }

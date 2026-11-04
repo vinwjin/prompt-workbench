@@ -8,8 +8,9 @@ export const connectionFingerprint=p=>createHash('sha256').update(JSON.stringify
 export function connectionFailure(error){const message=String(error||'连接失败').slice(0,1000),httpStatus=Number(message.match(/HTTP\s+(\d{3})/)?.[1])||null;return {message,httpStatus,stage:httpStatus?'http':/JSON|响应.*格式|解析/.test(message)?'parse':/超时/.test(message)?'timeout':'network',suggestion:httpStatus===401||httpStatus===403?'检查密钥及访问权限':httpStatus===404?'检查服务地址与接口路径':httpStatus===429?'检查服务限流或额度':httpStatus?'查看服务状态及错误详情':'检查地址、网络与服务是否运行'};}
 
 export class ConnectionManagement{
-  constructor(store,jobs){this.store=store;this.jobs=jobs;}
+  constructor(store,jobs,lifecycle){this.store=store;this.jobs=jobs;this.lifecycle=lifecycle;}
   provider(id){const p=this.store.get('providers',id);if(!p)throw Error('连接不存在，请刷新');return p;}
+  capabilities(p){return this.lifecycle?.capabilities(p)||null;}
   diagnostics(p){
     const fingerprint=connectionFingerprint(p),check=this.store.get('connectionChecks',p.id);
     const tests=this.store.db.prepare("SELECT body FROM records WHERE kind='jobs' AND json_extract(body,'$.connectionTest')=1 AND json_extract(body,'$.providerId')=? ORDER BY json_extract(body,'$.createdAt') DESC LIMIT 8").all(p.id).map(row=>{const j=JSON.parse(row.body);return {id:j.id,model:j.model,status:j.status,output:j.output||j.partialOutput||'',error:j.error||'',createdAt:j.createdAt,finishedAt:j.finishedAt,durationMs:j.metrics?.totalMs??null,currentConfig:j.connectionFingerprint===fingerprint};});
@@ -17,11 +18,11 @@ export class ConnectionManagement{
   }
   catalog(id){
     const p=this.provider(id),cached=this.store.get('modelLists',id);validateModelPreferences(p.modelPreferences);const preferences=Object.assign(Object.create(null),p.modelPreferences||{}),models=new Map();
-    for(const m of (cached?.models||[]).slice(0,2000))if(m.id)models.set(m.id,{id:m.id,...modelMetadata(m),source:'upstream',status:m.status||'available',vision:typeof m.vision==='boolean'?m.vision:null,visionSource:typeof m.vision==='boolean'?'service':'unknown'});
+    for(const m of (cached?.models||[]).slice(0,2000))if(m.id)models.set(m.id,{id:m.id,...modelMetadata(m),source:['local-configuration','local-file'].includes(cached?.source)?cached.source:'upstream',status:m.status||'available',vision:typeof m.vision==='boolean'?m.vision:null,visionSource:typeof m.vision==='boolean'?'service':'unknown'});
     for(const [id,pref]of Object.entries(preferences))if((pref.manual||pref.favorite)&&!models.has(id))models.set(id,{id,displayName:id,source:pref.manual?'manual':'retained',status:'manual',vision:null,visionSource:'unknown'});
     if(p.model&&!models.has(p.model))models.set(p.model,{id:p.model,displayName:p.model,source:'retained',status:'selected',vision:null,visionSource:'unknown'});
     const diagnostics=this.diagnostics(p);
-    return {providerId:id,updatedAt:p.updatedAt,defaultModel:p.model||'',fetchedAt:cached?.checkedAt||null,models:[...models.values()].map(m=>{const pref=preferences[m.id]||{},test=diagnostics.tests.find(t=>t.currentConfig&&t.model===m.id);return {...m,favorite:pref.favorite===true,manual:pref.manual===true,...(test?{lastTest:{status:test.status,at:test.finishedAt||test.createdAt}}:{}),...(typeof pref.vision==='boolean'?{vision:pref.vision,visionSource:'manual'}:{})};}),...diagnostics};
+    return {providerId:id,updatedAt:p.updatedAt,defaultModel:p.model||'',fetchedAt:cached?.checkedAt||null,capabilities:this.capabilities(p),models:[...models.values()].map(m=>{const pref=preferences[m.id]||{},test=diagnostics.tests.find(t=>t.currentConfig&&t.model===m.id);return {...m,favorite:pref.favorite===true,manual:pref.manual===true,...(test?{lastTest:{status:test.status,at:test.finishedAt||test.createdAt}}:{}),...(typeof pref.vision==='boolean'?{vision:pref.vision,visionSource:'manual'}:{})};}),...diagnostics};
   }
   saveModel(id,input){
     const p=this.provider(id),model=modelId(input.model);if(input.expectedUpdatedAt&&input.expectedUpdatedAt!==p.updatedAt)throw Error('模型配置已更新，请刷新后重试');
@@ -41,5 +42,6 @@ export class ConnectionManagement{
     if(this.jobs.active||this.jobs.queue.length||this.jobs.lifecycle.locked)throw Error('请等当前任务或模型操作完成，再测试生成');
     const input=prompt.trim();return this.jobs.enqueueSnapshot({providerId:id,model,input,maxTokens:128,temperature:0,stream:true,autoUnload:true},{templateId:'connection-test',templateName:'连接测试',templateRevision:1,compiled:{system:'简短回应用户的连接测试消息，只输出测试所需内容。',user:input},variables:{},rawInput:input},{connectionTest:true,connectionFingerprint:connectionFingerprint(p)});
   }
-  overview(){return {items:this.store.list('providers').map(p=>({id:p.id,local:localProtocols.has(p.protocol),modelCount:this.catalog(p.id).models.length,fetchedAt:this.store.get('modelLists',p.id)?.checkedAt||null,...this.diagnostics(p)}))};}
+  // 概览只投影摘要：目录计数、最近检查与一条调用摘要；不在每条连接上重复构造完整目录与诊断。
+  overview(){return {items:this.store.list('providers').map(p=>{const cached=this.store.get('modelLists',p.id);const preferences=Object.assign(Object.create(null),p.modelPreferences||{});const manualCount=Object.values(preferences).filter(v=>v?.manual||v?.favorite).length;const count=Math.min(2000,(cached?.models||[]).length)+manualCount;const fingerprint=connectionFingerprint(p);const check=this.store.get('connectionChecks',p.id);const latest=this.store.db.prepare("SELECT body FROM records WHERE kind='jobs' AND json_extract(body,'$.connectionTest')=1 AND json_extract(body,'$.providerId')=? ORDER BY json_extract(body,'$.createdAt') DESC LIMIT 1").get(p.id);let lastTest=null;if(latest){const j=JSON.parse(latest.body);lastTest={model:j.model,status:j.status,finishedAt:j.finishedAt,currentConfig:j.connectionFingerprint===fingerprint};}return {id:p.id,local:localProtocols.has(p.protocol),modelCount:count,fetchedAt:cached?.checkedAt||null,capabilities:this.capabilities(p),check:check?{online:check.online,checkedAt:check.checkedAt,latencyMs:check.latencyMs,currentConfig:check.fingerprint===fingerprint}:null,lastTest};})};}
 }
