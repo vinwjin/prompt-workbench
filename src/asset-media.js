@@ -45,6 +45,7 @@ export class AssetMedia{
   committed(rows=[]){for(const r of rows)if(r.uploadId){const value=this.staged.get(r.uploadId)?.row;if(value)this.transient.delete(value.id);this.staged.delete(r.uploadId);}}
   referenced(id){
     if(!!this.store.db.prepare("SELECT 1 FROM records r,json_each(CASE WHEN r.kind='assets' THEN json_extract(r.body,'$.media') ELSE json_extract(r.body,'$.originalMedia') END) m WHERE r.kind IN ('assets','jobs') AND json_extract(m.value,'$.id')=? LIMIT 1").get(id))return true;
+    if(!!this.store.db.prepare("SELECT 1 FROM records r,json_each(json_extract(r.body,'$.images')) m WHERE r.kind='jobs' AND json_extract(m.value,'$.id')=? LIMIT 1").get(id))return true;
     // comfyJobs 的引用：顶层 mediaId（结果图）与 slots.*.mediaId（上传输入图），防止被当作无主文件误清。
     // slots 里含非对象槽（如 prompt='hello'、null），json_extract 对裸字符串会抛 malformed JSON，
     // 故先 json_valid + json_type 护栏，仅对对象槽读取 mediaId。

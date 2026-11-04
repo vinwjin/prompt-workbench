@@ -4,9 +4,30 @@ import {mkdirSync,mkdtempSync,readFileSync} from 'node:fs';
 import path from 'node:path';
 import {createWorkbench} from './source-fixtures.js';
 import {hydrateImages} from '../src/job-images.js';
+import {externalizeImages} from '../src/job-images.js';
+import {Readable} from 'node:stream';
 const temp=()=>{mkdirSync('work',{recursive:true});return mkdtempSync(path.resolve(process.env.PW_TEST_ROOT||'work','job-images-'));};
 const png=readFileSync('public/icon-256.png');
 const dataUrl='data:image/png;base64,'+png.toString('base64');
+
+test('取消、过期待确认素材和导入回滚均保留已持久任务引用的同哈希参考图',async()=>{
+  for(const action of ['discard','expire','rollback']){
+    const app=await createWorkbench({port:0,dataDir:temp()});
+    try{
+      const staged=await app.assetMedia.upload(Readable.from([png]),'fixture.png');
+      const images=externalizeImages(app.store,[{name:'fixture.png',dataUrl}]);
+      assert.equal(images[0].id,staged.id);
+      const job=app.store.put('jobs',{status:'succeeded',input:'模拟输入',output:'模拟结果',images});
+      if(action==='discard')app.assetMedia.discard(staged.uploadId);
+      else if(action==='expire'){app.assetMedia.staged.get(staged.uploadId).expires=0;app.assetMedia.expire();}
+      else app.assetMedia.rollbackImport([staged.id]);
+      assert.equal(hydrateImages(app.store,app.store.get('jobs',job.id).images)[0].dataUrl,dataUrl);
+      const base='http://127.0.0.1:'+app.port,cookie=(await fetch(base)).headers.get('set-cookie').split(';')[0];
+      const exported=await(await fetch(base+'/api/export',{headers:{cookie}})).json();
+      assert.ok(exported.mediaFiles.some(f=>f.id===staged.id&&f.base64===png.toString('base64')));
+    }finally{await app.close();}
+  }
+});
 
 test('任务参考图外置为哈希引用，生成读回字节一致；导出导入跨库字节一致',async()=>{
   const app=await createWorkbench({port:0,dataDir:temp(),generator:async(p,input)=>({output:'模拟结果'})});
